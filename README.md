@@ -1,64 +1,99 @@
-# Nuxt Starter Template
+# XRumer Admin
 
-[![Nuxt UI](https://img.shields.io/badge/Made%20with-Nuxt%20UI-00DC82?logo=nuxt&labelColor=020420)](https://ui.nuxt.com)
+Запуск проекта через `docker-compose.yaml` (PostgreSQL + API + Frontend).
 
-Use this template to get started with [Nuxt UI](https://ui.nuxt.com) quickly.
+## Что важно перед запуском
 
-- [Live demo](https://starter-template.nuxt.dev/)
-- [Documentation](https://ui.nuxt.com/docs/getting-started/installation/nuxt)
+В `docker-compose.yaml` примонтированы пути из **корня проекта**:
 
-<a href="https://starter-template.nuxt.dev/" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://ui.nuxt.com/assets/templates/nuxt/starter-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://ui.nuxt.com/assets/templates/nuxt/starter-light.png">
-    <img alt="Nuxt Starter Template" src="https://ui.nuxt.com/assets/templates/nuxt/starter-light.png" width="830" height="466">
-  </picture>
-</a>
+- `./proxy.txt -> /app/proxy.txt` (для API)
+- `./domains -> /app/domains` (папка со списками доменов)
 
-> The starter template for Vue is on https://github.com/nuxt-ui-templates/starter-vue.
+Подготовьте структуру:
 
-## Quick Start
-
-```bash [Terminal]
-npm create nuxt@latest -- -t ui
+```text
+/opt/xrumer-admin
+├── docker-compose.yaml
+├── proxy.txt
+└── domains/
+    ├── list-1.txt
+    └── list-2.txt
 ```
 
-## Deploy your own
+## Формат `proxy.txt`
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-name=starter&repository-url=https%3A%2F%2Fgithub.com%2Fnuxt-ui-templates%2Fstarter&demo-image=https%3A%2F%2Fui.nuxt.com%2Fassets%2Ftemplates%2Fnuxt%2Fstarter-dark.png&demo-url=https%3A%2F%2Fstarter-template.nuxt.dev%2F&demo-title=Nuxt%20Starter%20Template&demo-description=A%20minimal%20template%20to%20get%20started%20with%20Nuxt%20UI.)
+Один прокси на строку.
 
-## Setup
+Рекомендуемый рабочий формат (URL-style):
 
-Make sure to install the dependencies:
+```text
+user:pass@ip:port
+```
+
+Пример:
+
+```text
+myuser:mypass@203.0.113.10:8080
+myuser:mypass@203.0.113.11:8080
+```
+
+Если у вас прокси в формате `user:pass:ip:port`, преобразуйте в `user:pass@ip:port`, иначе прокси может не распознаться корректно.
+
+## Формат файлов в `domains/`
+
+- В папке `domains/` можно хранить несколько файлов со списками доменов.
+- В каждом файле - по одному домену на строку.
+- Допустимо с `http://`/`https://` или без схемы (домен будет нормализован API).
+
+Пример `domains/list-1.txt`:
+
+```text
+example.com
+https://nuxt.com
+subdomain.example.org
+```
+
+## Запуск
+
+Из корня проекта:
 
 ```bash
-pnpm install
+docker compose up -d --build
 ```
 
-## Development Server
-
-Start the development server on `http://localhost:3000`:
+Проверка статуса:
 
 ```bash
-pnpm dev
+docker compose ps
 ```
 
-## Production
+## Доступ к сервисам
 
-Build the application for production:
+- Frontend: `http://localhost:3001`
+- API: `http://localhost:8080`
+- PostgreSQL: `localhost:5434`
+
+## Логи
 
 ```bash
-pnpm build
+docker compose logs -f api
+docker compose logs -f frontend
+docker compose logs -f postgres
 ```
 
-Locally preview production build:
+## Остановка
 
 ```bash
-pnpm preview
+docker compose down
 ```
 
-Check out the [deployment documentation](https://nuxt.com/docs/getting-started/deployment) for more information.
+С удалением томов БД:
 
-## Renovate integration
+```bash
+docker compose down -v
+```
 
-Install [Renovate GitHub app](https://github.com/apps/renovate/installations/select_target) on your repository and you are good to go.
+## Полезно
+
+- Swagger/документации API в проекте нет, но есть описание CRUD-эндпоинтов в `api/README.md`.
+- Если контейнер `api` стартует, но задачи не используют прокси, сначала проверьте формат строк в `proxy.txt`.
