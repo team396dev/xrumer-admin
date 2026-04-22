@@ -1,0 +1,62 @@
+# =========================
+# Frontend (Nuxt / Node.js)
+# =========================
+
+# Nuxt/Nitro outputs
+.output/
+.data/
+.nuxt/
+.nitro/
+.cache/
+dist/
+proxy.txt
+domains/
+
+# Node dependencies
+node_modules/
+
+# TypeScript incremental files
+*.tsbuildinfo
+
+# =========================
+# API (Go)
+# =========================
+
+# Go build outputs
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+cover.out
+
+# API runtime data
+api/.logs/
+api/*.log
+
+# API local secrets/config
+api/.env
+api/.env.*
+
+# Proxy/source lists used locally
+api/proxy.txt
+
+# =========================
+# Shared
+# =========================
+
+# Logs
+logs/
+*.log
+
+# Local env files (project root)
+.env
+.env.*
+!.env.example
+
+# Editor/OS
+.DS_Store
+.fleet/
+.idea/

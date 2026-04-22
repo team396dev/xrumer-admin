@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres_xrumer
+    environment:
+      POSTGRES_USER: uxrumer
+      POSTGRES_PASSWORD: pwdxrumer
+      POSTGRES_DB: dbxrumer
+    ports:
+      - '5434:5432'
+    volumes:
+      - xrumer_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U uxrumer -d dbxrumer']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: golang:1.26-alpine
+    container_name: xrumer_api
+    working_dir: /app
+    command: sh -c "go mod download && go run api.go"
+    environment:
+      GIN_MODE: release
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_USER: uxrumer
+      DB_PASSWORD: pwdxrumer
+      DB_NAME: dbxrumer
+      DB_SSLMODE: disable
+      DB_TIMEZONE: UTC
+      API_PORT: '8080'
+      THREADS: '25'
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./api:/app
+      - ./api/domains:/app/domains
+      - ./api/proxy.txt:/app/proxy.txt
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: node:22-alpine
+    container_name: xrumer_frontend
+    working_dir: /app
+    command: sh -c "npm ci --include=dev && npm run build && NODE_ENV=production node .output/server/index.mjs"
+    environment:
+      NODE_ENV: production
+      NITRO_HOST: 0.0.0.0
+      NITRO_PORT: '3000'
+      API_URL: http://api:8080
+      NUXT_PUBLIC_API_BASE_URL: /backend
+    ports:
+      - '3001:3000'
+    volumes:
+      - ./:/app
+      - xrumer_node_modules:/app/node_modules
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  xrumer_postgres_data:
+    driver: local
+  xrumer_node_modules:
+    driver: local

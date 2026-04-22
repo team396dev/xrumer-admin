@@ -1,0 +1,15 @@
+package models
+
+type CmsTotal struct {
+	Name  string
+	Total uint
+}
+
+type Dashboard struct {
+	Total       uint
+	Detected    uint
+	ToPlacement uint
+	ProxyTotal  uint
+	ProxyValid  uint
+	CmsTable    []CmsTotal
+}
