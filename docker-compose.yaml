@@ -37,8 +37,6 @@ services:
       - '8080:8080'
     volumes:
       - ./api:/app
-      - ./api/domains:/app/domains
-      - ./api/proxy.txt:/app/proxy.txt
     depends_on:
       postgres:
         condition: service_healthy
