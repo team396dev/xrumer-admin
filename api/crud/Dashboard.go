@@ -34,6 +34,13 @@ func buildDashboard(db *gorm.DB) (models.Dashboard, error) {
 		return models.Dashboard{}, err
 	}
 
+	var checked int64
+	if err := db.Model(&models.Website{}).
+		Where("cms IS NOT NULL").
+		Count(&checked).Error; err != nil {
+		return models.Dashboard{}, err
+	}
+
 	var detected int64
 	if err := db.Model(&models.Website{}).
 		Where("cms IS NOT NULL AND cms <> '' AND LOWER(cms) <> ?", "undefined").
@@ -73,6 +80,7 @@ func buildDashboard(db *gorm.DB) (models.Dashboard, error) {
 
 	return models.Dashboard{
 		Total:       uint(total),
+		Checked:     uint(checked),
 		Detected:    uint(detected),
 		ToPlacement: uint(toPlacement),
 		ProxyTotal:  proxyTotal,

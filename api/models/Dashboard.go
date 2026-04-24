@@ -7,6 +7,7 @@ type CmsTotal struct {
 
 type Dashboard struct {
 	Total       uint
+	Checked     uint
 	Detected    uint
 	ToPlacement uint
 	ProxyTotal  uint

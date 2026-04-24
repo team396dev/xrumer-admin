@@ -21,7 +21,7 @@ func Detect(db *gorm.DB, threads int, logger *slog.Logger) {
 
 	for {
 		var websites []models.Website
-		db.Where("cms is null").Limit(threads * 2).Find(&websites)
+		db.Where("cms is null").Order("RANDOM()").Limit(threads * 2).Find(&websites)
 
 		if len(websites) == 0 {
 			time.Sleep(detectPollDelay)

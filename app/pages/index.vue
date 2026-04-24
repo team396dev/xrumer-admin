@@ -10,6 +10,7 @@
     if (!dashboard.value) {
       return {
         total: 0,
+        checked: 0,
         detected: 0,
         toPlacement: 0,
         proxy: 0
@@ -18,6 +19,7 @@
 
     return {
       total: dashboard.value.Total,
+      checked: dashboard.value.Checked,
       detected: dashboard.value.Detected,
       toPlacement: dashboard.value.ToPlacement,
       proxy: `${dashboard.value.ProxyTotal}`
@@ -34,8 +36,9 @@
 
 <template>
   <div>
-    <UPageGrid class="relative grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 gap-8">
+    <UPageGrid class="relative grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-8">
       <UPageCard :title="String(cards.total)" description="Всего сайтов" icon="i-lucide-earth"/>
+      <UPageCard :title="String(cards.checked)" description="Сайтов проверено" icon="i-lucide-list-checks"/>
       <UPageCard :title="String(cards.detected)" description="Сайтов распознано" icon="i-lucide-search-check"/>
       <UPageCard :title="String(cards.toPlacement)" description="Сайтов под размещение" icon="i-lucide-circle-check-big"/>
       <UPageCard :title="String(cards.proxy)" description="Прокси" icon="i-lucide-network"/>
