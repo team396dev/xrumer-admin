@@ -5,6 +5,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strconv"
 
 	"api/crud"
 	"api/models"
@@ -84,9 +85,9 @@ func main() {
 	router.GET("/pages", crud.PageListHandler(db))
 	router.GET("/dashboard", crud.DashboardGetHandler(db))
 
-	// threads, _ := strconv.Atoi(getEnv("THREADS", "10"))
+	threads, _ := strconv.Atoi(getEnv("THREADS", "10"))
 	go tasks.Index(db, logger)
-	// go tasks.Detect(db, threads, logger)
+	go tasks.Detect(db, threads, logger)
 
 	addr := "0.0.0.0:" + getEnv("API_PORT", "8080")
 	log.Printf("api server is running on %s", addr)

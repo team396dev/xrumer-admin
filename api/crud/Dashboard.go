@@ -48,7 +48,7 @@ func buildDashboard(db *gorm.DB) (models.Dashboard, error) {
 		return models.Dashboard{}, err
 	}
 
-	proxyTotal, err := countProxyTotal("proxy.txt")
+	proxyTotal, err := countProxyTotal(resolveProxyFilePath())
 	if err != nil {
 		return models.Dashboard{}, err
 	}
@@ -108,4 +108,23 @@ func countProxyTotal(filePath string) (uint, error) {
 	}
 
 	return total, nil
+}
+
+func resolveProxyFilePath() string {
+	candidates := []string{"proxy.txt", "api/proxy.txt", "../api/proxy.txt"}
+
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+
+		if info.IsDir() {
+			continue
+		}
+
+		return candidate
+	}
+
+	return "proxy.txt"
 }
