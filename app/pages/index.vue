@@ -2,8 +2,22 @@
   const config = useRuntimeConfig()
   const apiBaseUrl = import.meta.server ? config.apiBaseUrl : config.public.apiBaseUrl
 
-  const { data: dashboard } = await useFetch('/dashboard', {
+  const { data: dashboard, refresh: refreshDashboard } = await useFetch('/dashboard', {
     baseURL: apiBaseUrl
+  })
+
+  let refreshTimer
+
+  onMounted(() => {
+    refreshTimer = setInterval(() => {
+      refreshDashboard()
+    }, 5 * 60 * 1000)
+  })
+
+  onUnmounted(() => {
+    if (refreshTimer) {
+      clearInterval(refreshTimer)
+    }
   })
 
   const cards = computed(() => {
