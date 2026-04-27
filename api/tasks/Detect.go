@@ -147,7 +147,7 @@ func applyWebsiteUpdatesBatch(db *gorm.DB, updates []websiteUpdate) error {
 
 	for i, update := range updates {
 		base := i*5 + 1
-		valueRows = append(valueRows, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4))
+		valueRows = append(valueRows, fmt.Sprintf("($%d::bigint,$%d::text,$%d::text,$%d::boolean,$%d::integer)", base, base+1, base+2, base+3, base+4))
 		args = append(args, update.ID, update.CMS, update.Lang, update.IsForum, update.Status)
 	}
 
