@@ -12,14 +12,15 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	proxyFilePath   = "proxy.txt"
 	maxProxyRetries = 3
-	requestTimeout  = 20 * time.Second
-	maxBodyBytes    = 4 * 1024 * 1024
+	requestTimeout  = 15 * time.Second
+	maxBodyBytes    = 50 * 1024
 )
 
 var (
@@ -46,6 +47,15 @@ var (
 	reFlarum      = regexp.MustCompile(`(?is)\bflarum\b|\bassets/forum-[a-z0-9]+\.js\b`)
 	reVanilla     = regexp.MustCompile(`(?is)\bvanilla\s+forums\b|\bjs/vanilla\b|\bvanilla\.[a-z0-9_]+\b`)
 	reNodeBB      = regexp.MustCompile(`(?is)\bnodebb\b|\bassets/nodebb(?:\.min)?\.js\b|\bapp\.config\['relative_path'\]\b`)
+)
+
+var (
+	directClient = newHTTPClient(nil)
+
+	proxyClientCache sync.Map
+
+	proxyListOnce sync.Once
+	cachedProxies []*url.URL
 )
 
 type DetectionResult struct {
@@ -87,7 +97,7 @@ func Detect(domain string) DetectionResult {
 		return result
 	}
 
-	proxies := readProxyList(resolveProxyPath())
+	proxies := loadProxyList()
 	page, err := fetchHomepage(normalizedDomain, proxies)
 	if err != nil {
 		return result
@@ -124,25 +134,26 @@ func fetchWithProxyRetry(targetURL string, proxies []*url.URL) (pageSnapshot, er
 		return fetchWithClient(targetURL, nil)
 	}
 
-	proxyPool := shuffledProxyPool(proxies)
 	attempts := maxProxyRetries
-	if len(proxyPool) < attempts {
-		attempts = len(proxyPool)
+	if len(proxies) < attempts {
+		attempts = len(proxies)
 	}
 
 	if attempts == 0 {
 		return fetchWithClient(targetURL, nil)
 	}
 
+	proxyPool := randomProxySample(proxies, attempts)
+
 	var lastErr error
-	for i := 0; i < attempts; i++ {
+	for i := 0; i < len(proxyPool); i++ {
 		proxyURL := proxyPool[i]
 		page, err := fetchWithClient(targetURL, proxyURL)
 		if err == nil {
 			return page, nil
 		}
 
-		if isProxyError(err) {
+		if isProxyError(err, proxyURL) {
 			lastErr = err
 			continue
 		}
@@ -158,19 +169,7 @@ func fetchWithProxyRetry(targetURL string, proxies []*url.URL) (pageSnapshot, er
 }
 
 func fetchWithClient(targetURL string, proxyURL *url.URL) (pageSnapshot, error) {
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
-
-	client := &http.Client{
-		Timeout:   requestTimeout,
-		Transport: transport,
-	}
+	client := getHTTPClient(proxyURL)
 
 	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -180,7 +179,6 @@ func fetchWithClient(targetURL string, proxyURL *url.URL) (pageSnapshot, error) 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Connection", "close")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -203,6 +201,90 @@ func fetchWithClient(targetURL string, proxyURL *url.URL) (pageSnapshot, error) 
 		Body:      body,
 		BodyLower: strings.ToLower(body),
 	}, nil
+}
+
+func loadProxyList() []*url.URL {
+	proxyListOnce.Do(func() {
+		cachedProxies = readProxyList(resolveProxyPath())
+	})
+
+	return cachedProxies
+}
+
+func getHTTPClient(proxyURL *url.URL) *http.Client {
+	if proxyURL == nil {
+		return directClient
+	}
+
+	key := proxyURL.String()
+	if value, ok := proxyClientCache.Load(key); ok {
+		if client, typeOK := value.(*http.Client); typeOK {
+			return client
+		}
+	}
+
+	client := newHTTPClient(proxyURL)
+	actual, _ := proxyClientCache.LoadOrStore(key, client)
+	if existing, ok := actual.(*http.Client); ok {
+		return existing
+	}
+
+	return client
+}
+
+func newHTTPClient(proxyURL *url.URL) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          10000,
+		MaxIdleConnsPerHost:   50,
+		MaxConnsPerHost:       50,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   requestTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 2 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+}
+
+func randomProxySample(proxies []*url.URL, count int) []*url.URL {
+	if len(proxies) == 0 || count <= 0 {
+		return nil
+	}
+
+	if count >= len(proxies) {
+		out := make([]*url.URL, len(proxies))
+		copy(out, proxies)
+		return out
+	}
+
+	result := make([]*url.URL, 0, count)
+	selected := make(map[int]struct{}, count)
+
+	for len(result) < count {
+		idx := rand.Intn(len(proxies))
+		if _, exists := selected[idx]; exists {
+			continue
+		}
+
+		selected[idx] = struct{}{}
+		result = append(result, proxies[idx])
+	}
+
+	return result
 }
 
 func detectCMS(page pageSnapshot) string {
@@ -752,46 +834,42 @@ func parseProxyURL(raw string) *url.URL {
 	return u
 }
 
-func shuffledProxyPool(in []*url.URL) []*url.URL {
-	if len(in) == 0 {
-		return nil
-	}
-
-	out := make([]*url.URL, len(in))
-	copy(out, in)
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rng.Shuffle(len(out), func(i, j int) {
-		out[i], out[j] = out[j], out[i]
-	})
-
-	return out
-}
-
-func isProxyError(err error) bool {
+func isProxyError(err error, proxyURL *url.URL) bool {
 	if err == nil {
 		return false
 	}
 
 	text := strings.ToLower(err.Error())
-	if strings.Contains(text, "proxy") || strings.Contains(text, "proxyconnect") {
+	if strings.Contains(text, "proxyconnect") || strings.Contains(text, "http: proxy error") || strings.Contains(text, "proxy authentication required") {
 		return true
 	}
 
 	var netErr *net.OpError
 	if errors.As(err, &netErr) {
 		op := strings.ToLower(netErr.Op)
-		if strings.Contains(op, "proxy") {
+		if strings.Contains(op, "proxyconnect") {
 			return true
+		}
+
+		if proxyURL != nil {
+			proxyHost := strings.ToLower(proxyURL.Hostname())
+			if proxyHost != "" {
+				netText := strings.ToLower(netErr.Error())
+				if strings.Contains(netText, proxyHost) {
+					return true
+				}
+			}
 		}
 	}
 
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		t := strings.ToLower(urlErr.Error())
-		if strings.Contains(t, "proxy") || strings.Contains(t, "proxyconnect") {
+		if strings.Contains(t, "proxyconnect") || strings.Contains(t, "http: proxy error") || strings.Contains(t, "proxy authentication required") {
 			return true
 		}
+
+		return isProxyError(urlErr.Err, proxyURL)
 	}
 
 	return false
