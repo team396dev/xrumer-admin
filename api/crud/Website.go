@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -359,11 +360,42 @@ func WebsiteBulkAcceptedImportHandler(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		var updatedRows int64
+		var createdDomains int
 		var tagsCreated int
 		var websitesTagged int
 		var tagLinksCreated int
 
 		err = db.Transaction(func(tx *gorm.DB) error {
+			existingDomains := []string{}
+			if err := tx.Model(&models.Website{}).
+				Where("domain IN ?", domains).
+				Pluck("domain", &existingDomains).Error; err != nil {
+				return err
+			}
+
+			existingDomainSet := make(map[string]struct{}, len(existingDomains))
+			for _, domain := range existingDomains {
+				existingDomainSet[domain] = struct{}{}
+			}
+
+			newWebsites := make([]models.Website, 0)
+			for _, domain := range domains {
+				if _, exists := existingDomainSet[domain]; exists {
+					continue
+				}
+				newWebsites = append(newWebsites, models.Website{
+					Domain:   domain,
+					Accepted: acceptedValue,
+				})
+			}
+
+			if len(newWebsites) > 0 {
+				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newWebsites).Error; err != nil {
+					return err
+				}
+				createdDomains = len(newWebsites)
+			}
+
 			updateResult := tx.Model(&models.Website{}).
 				Where("domain IN ?", domains).
 				Update("accepted", acceptedValue)
@@ -467,6 +499,7 @@ func WebsiteBulkAcceptedImportHandler(db *gorm.DB) gin.HandlerFunc {
 			"valid_domains":   validDomains,
 			"unique_domains":  len(domains),
 			"matched_domains": matchedDomains,
+			"created_domains": createdDomains,
 			"updated_rows":    updatedRows,
 			"tags_created":    tagsCreated,
 			"websites_tagged": websitesTagged,

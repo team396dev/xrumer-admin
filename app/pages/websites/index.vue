@@ -446,7 +446,7 @@ await loadWebsites()
           color="success"
           variant="soft"
           :title="`Обновлено: ${importResult.updated_rows}`"
-          :description="`Строк: ${importResult.total_lines}, валидных доменов: ${importResult.valid_domains}, совпало в БД: ${importResult.matched_domains}, создано тегов: ${importResult.tags_created || 0}, сайтов с тегами: ${importResult.websites_tagged || 0}`"
+          :description="`Строк: ${importResult.total_lines}, валидных доменов: ${importResult.valid_domains}, совпало в БД: ${importResult.matched_domains}, новых доменов: ${importResult.created_domains || 0}, создано тегов: ${importResult.tags_created || 0}, сайтов с тегами: ${importResult.websites_tagged || 0}`"
         />
       </div>
     </template>
