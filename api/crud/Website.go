@@ -25,6 +25,7 @@ const (
 	defaultPage    = 1
 	defaultPerPage = 20
 	maxPerPage     = 200
+	domainBatchSize = 500
 )
 
 type websiteFilters struct {
@@ -99,6 +100,16 @@ type websiteExportRow struct {
 	IsForum  bool   `gorm:"column:is_forum"`
 	Status   int    `gorm:"column:status"`
 	Accepted *bool  `gorm:"column:accepted"`
+}
+
+type websiteDomainRow struct {
+	ID     uint   `gorm:"column:id"`
+	Domain string `gorm:"column:domain"`
+}
+
+type websiteTagWebsiteLink struct {
+	WebsiteID    uint `gorm:"column:website_id"`
+	WebsiteTagID uint `gorm:"column:website_tag_id"`
 }
 
 func WebsiteListHandler(db *gorm.DB) gin.HandlerFunc {
@@ -352,11 +363,16 @@ func WebsiteBulkAcceptedImportHandler(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		var matchedDomains int64
-		if err := db.Model(&models.Website{}).
-			Where("domain IN ?", domains).
-			Count(&matchedDomains).Error; err != nil {
-			c.JSON(500, gin.H{"error": "failed to match domains"})
-			return
+		domainChunks := splitStringSliceIntoChunks(domains, domainBatchSize)
+		for _, domainChunk := range domainChunks {
+			var chunkCount int64
+			if err := db.Model(&models.Website{}).
+				Where("domain IN ?", domainChunk).
+				Count(&chunkCount).Error; err != nil {
+				c.JSON(500, gin.H{"error": "failed to match domains"})
+				return
+			}
+			matchedDomains += chunkCount
 		}
 
 		var updatedRows int64
@@ -366,43 +382,32 @@ func WebsiteBulkAcceptedImportHandler(db *gorm.DB) gin.HandlerFunc {
 		var tagLinksCreated int
 
 		err = db.Transaction(func(tx *gorm.DB) error {
-			existingDomains := []string{}
-			if err := tx.Model(&models.Website{}).
-				Where("domain IN ?", domains).
-				Pluck("domain", &existingDomains).Error; err != nil {
-				return err
-			}
-
-			existingDomainSet := make(map[string]struct{}, len(existingDomains))
-			for _, domain := range existingDomains {
-				existingDomainSet[domain] = struct{}{}
-			}
-
-			newWebsites := make([]models.Website, 0)
-			for _, domain := range domains {
-				if _, exists := existingDomainSet[domain]; exists {
-					continue
+			for _, domainChunk := range domainChunks {
+				chunkWebsites := make([]models.Website, 0, len(domainChunk))
+				for _, domain := range domainChunk {
+					chunkWebsites = append(chunkWebsites, models.Website{
+						Domain:   domain,
+						Accepted: acceptedValue,
+					})
 				}
-				newWebsites = append(newWebsites, models.Website{
-					Domain:   domain,
-					Accepted: acceptedValue,
-				})
-			}
 
-			if len(newWebsites) > 0 {
-				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newWebsites).Error; err != nil {
-					return err
+				createResult := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunkWebsites)
+				if createResult.Error != nil {
+					return createResult.Error
 				}
-				createdDomains = len(newWebsites)
+
+				createdDomains += int(createResult.RowsAffected)
 			}
 
-			updateResult := tx.Model(&models.Website{}).
-				Where("domain IN ?", domains).
-				Update("accepted", acceptedValue)
-			if updateResult.Error != nil {
-				return updateResult.Error
+			for _, domainChunk := range domainChunks {
+				updateResult := tx.Model(&models.Website{}).
+					Where("domain IN ?", domainChunk).
+					Update("accepted", acceptedValue)
+				if updateResult.Error != nil {
+					return updateResult.Error
+				}
+				updatedRows += updateResult.RowsAffected
 			}
-			updatedRows = updateResult.RowsAffected
 
 			allTagsSet := map[string]struct{}{}
 			for _, tags := range domainTagsMap {
@@ -418,31 +423,26 @@ func WebsiteBulkAcceptedImportHandler(db *gorm.DB) gin.HandlerFunc {
 
 			tagsByValue := map[string]models.WebsiteTag{}
 			if len(allTags) > 0 {
-				existingTags := []models.WebsiteTag{}
-				if err := tx.Where("tag IN ?", allTags).Find(&existingTags).Error; err != nil {
-					return err
-				}
-
-				existingTagSet := map[string]struct{}{}
-				for _, tag := range existingTags {
-					existingTagSet[tag.Tag] = struct{}{}
-					tagsByValue[tag.Tag] = tag
-				}
-
-				newTags := make([]models.WebsiteTag, 0)
-				for _, tag := range allTags {
-					if _, exists := existingTagSet[tag]; exists {
-						continue
+				tagChunks := splitStringSliceIntoChunks(allTags, domainBatchSize)
+				for _, tagChunk := range tagChunks {
+					newTags := make([]models.WebsiteTag, 0, len(tagChunk))
+					for _, tag := range tagChunk {
+						newTags = append(newTags, models.WebsiteTag{Tag: tag})
 					}
-					newTags = append(newTags, models.WebsiteTag{Tag: tag})
+
+					createTagsResult := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newTags)
+					if createTagsResult.Error != nil {
+						return createTagsResult.Error
+					}
+					tagsCreated += int(createTagsResult.RowsAffected)
 				}
 
-				if len(newTags) > 0 {
-					if err := tx.Create(&newTags).Error; err != nil {
+				for _, tagChunk := range tagChunks {
+					chunkTags := []models.WebsiteTag{}
+					if err := tx.Where("tag IN ?", tagChunk).Find(&chunkTags).Error; err != nil {
 						return err
 					}
-					tagsCreated = len(newTags)
-					for _, tag := range newTags {
+					for _, tag := range chunkTags {
 						tagsByValue[tag.Tag] = tag
 					}
 				}
@@ -452,36 +452,58 @@ func WebsiteBulkAcceptedImportHandler(db *gorm.DB) gin.HandlerFunc {
 				return nil
 			}
 
-			websites := []models.Website{}
-			if err := tx.Where("domain IN ?", domains).Find(&websites).Error; err != nil {
-				return err
-			}
-
-			for _, website := range websites {
-				tagNames := domainTagsMap[website.Domain]
-				if len(tagNames) == 0 {
-					continue
-				}
-
-				websiteTags := make([]models.WebsiteTag, 0, len(tagNames))
-				for _, tagName := range tagNames {
-					tag, exists := tagsByValue[tagName]
-					if !exists {
-						continue
-					}
-					websiteTags = append(websiteTags, tag)
-				}
-
-				if len(websiteTags) == 0 {
-					continue
-				}
-
-				if err := tx.Model(&website).Association("WebsiteTags").Append(websiteTags); err != nil {
+			websiteRows := []websiteDomainRow{}
+			for _, domainChunk := range domainChunks {
+				chunkRows := []websiteDomainRow{}
+				if err := tx.Model(&models.Website{}).
+					Select("id, domain").
+					Where("domain IN ?", domainChunk).
+					Find(&chunkRows).Error; err != nil {
 					return err
 				}
+				websiteRows = append(websiteRows, chunkRows...)
+			}
 
-				websitesTagged++
-				tagLinksCreated += len(websiteTags)
+			websiteIDByDomain := make(map[string]uint, len(websiteRows))
+			for _, row := range websiteRows {
+				websiteIDByDomain[row.Domain] = row.ID
+			}
+
+			links := make([]websiteTagWebsiteLink, 0)
+			for domain, tagNames := range domainTagsMap {
+				websiteID, exists := websiteIDByDomain[domain]
+				if !exists || len(tagNames) == 0 {
+					continue
+				}
+
+				linksForWebsite := 0
+				for _, tagName := range tagNames {
+					tag, tagExists := tagsByValue[tagName]
+					if !tagExists {
+						continue
+					}
+
+					links = append(links, websiteTagWebsiteLink{
+						WebsiteID:    websiteID,
+						WebsiteTagID: tag.ID,
+					})
+					linksForWebsite++
+				}
+
+				if linksForWebsite > 0 {
+					websitesTagged++
+					tagLinksCreated += linksForWebsite
+				}
+			}
+
+			if len(links) > 0 {
+				for _, linksChunk := range splitWebsiteTagLinksIntoChunks(links, domainBatchSize*4) {
+					if err := tx.Table("website_tag_websites").
+						Clauses(clause.OnConflict{DoNothing: true}).
+						Create(&linksChunk).Error; err != nil {
+						return err
+					}
+				}
 			}
 
 			return nil
@@ -574,6 +596,48 @@ func normalizeWebsiteDomain(raw string) string {
 	}
 
 	return host
+}
+
+func splitStringSliceIntoChunks(items []string, chunkSize int) [][]string {
+	if len(items) == 0 {
+		return nil
+	}
+
+	if chunkSize <= 0 {
+		chunkSize = len(items)
+	}
+
+	chunks := make([][]string, 0, (len(items)+chunkSize-1)/chunkSize)
+	for start := 0; start < len(items); start += chunkSize {
+		end := start + chunkSize
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[start:end])
+	}
+
+	return chunks
+}
+
+func splitWebsiteTagLinksIntoChunks(items []websiteTagWebsiteLink, chunkSize int) [][]websiteTagWebsiteLink {
+	if len(items) == 0 {
+		return nil
+	}
+
+	if chunkSize <= 0 {
+		chunkSize = len(items)
+	}
+
+	chunks := make([][]websiteTagWebsiteLink, 0, (len(items)+chunkSize-1)/chunkSize)
+	for start := 0; start < len(items); start += chunkSize {
+		end := start + chunkSize
+		if end > len(items) {
+			end = len(items)
+		}
+		chunks = append(chunks, items[start:end])
+	}
+
+	return chunks
 }
 
 func parseWebsiteExportType(raw string) (websiteExportType, error) {
