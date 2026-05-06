@@ -22,6 +22,29 @@ const importFile = ref(null)
 const importing = ref(false)
 const importError = ref('')
 const importResult = ref(null)
+const importJobId = ref('')
+const importProgress = reactive({
+  status: '',
+  phase: '',
+  message: '',
+  total_lines: 0,
+  processed_lines: 0,
+  progress_percent: 0,
+  error: ''
+})
+let importStatusTimer = null
+
+const importRemainingLines = computed(() => {
+  if (!importProgress.total_lines) {
+    return 0
+  }
+
+  return Math.max(importProgress.total_lines - importProgress.processed_lines, 0)
+})
+
+const importProgressPercent = computed(() => {
+  return Number(importProgress.progress_percent || 0)
+})
 
 const page = ref(1)
 const perPage = 20
@@ -219,11 +242,74 @@ function onImportFileChange(event) {
   importResult.value = null
 }
 
+function resetImportProgress() {
+  importJobId.value = ''
+  importProgress.status = ''
+  importProgress.phase = ''
+  importProgress.message = ''
+  importProgress.total_lines = 0
+  importProgress.processed_lines = 0
+  importProgress.progress_percent = 0
+  importProgress.error = ''
+}
+
+function stopImportPolling() {
+  if (!importStatusTimer) {
+    return
+  }
+
+  clearTimeout(importStatusTimer)
+  importStatusTimer = null
+}
+
+async function pollImportStatus() {
+  if (!importJobId.value) {
+    return
+  }
+
+  try {
+    const payload = await $fetch(`/websites/accepted/import/${importJobId.value}`, {
+      baseURL: apiBaseUrl
+    })
+
+    importProgress.status = payload.status || ''
+    importProgress.phase = payload.phase || ''
+    importProgress.message = payload.message || ''
+    importProgress.total_lines = Number(payload.total_lines || 0)
+    importProgress.processed_lines = Number(payload.processed_lines || 0)
+    importProgress.progress_percent = Number(payload.progress_percent || 0)
+    importProgress.error = payload.error || ''
+
+    if (payload.status === 'completed') {
+      importResult.value = payload.result || null
+      importing.value = false
+      stopImportPolling()
+      await resetAndReload()
+      return
+    }
+
+    if (payload.status === 'failed') {
+      importError.value = payload.error || 'Ошибка импорта'
+      importing.value = false
+      stopImportPolling()
+      return
+    }
+
+    importStatusTimer = setTimeout(pollImportStatus, 1200)
+  } catch (error) {
+    importing.value = false
+    importError.value = error?.message || 'Ошибка получения прогресса импорта'
+    stopImportPolling()
+  }
+}
+
 watch(importOpen, (isOpen) => {
   if (!isOpen) {
+    stopImportPolling()
     importFile.value = null
     importError.value = ''
     importResult.value = null
+    resetImportProgress()
   }
 })
 
@@ -244,6 +330,7 @@ async function submitImport() {
 
   importError.value = ''
   importResult.value = null
+  resetImportProgress()
   importing.value = true
 
   try {
@@ -263,14 +350,20 @@ async function submitImport() {
       throw new Error(payload?.error || `Import failed with status ${response.status}`)
     }
 
-    importResult.value = payload
-    await resetAndReload()
+    importJobId.value = payload.job_id || ''
+    importProgress.status = payload.status || 'queued'
+    importProgress.phase = payload.phase || 'queued'
+    importProgress.message = payload.message || 'Задача создана'
+
+    await pollImportStatus()
   } catch (error) {
     importError.value = error?.message || 'Ошибка импорта'
-  } finally {
-    importing.value = false
   }
 }
+
+onBeforeUnmount(() => {
+  stopImportPolling()
+})
 
 const actionsExport = computed(() => [
   {
@@ -429,9 +522,22 @@ await loadWebsites()
             color="primary"
             :label="importType === 'good' ? 'Импортировать хорошие' : 'Импортировать плохие'"
             :loading="importing"
-            :disabled="!importFile"
+            :disabled="!importFile || importing"
             @click="submitImport"
           />
+        </div>
+
+        <div v-if="importing || importProgress.status" class="space-y-2">
+          <div class="flex items-center justify-between text-xs text-muted">
+            <span>{{ importProgress.message || 'Импорт выполняется' }}</span>
+            <span>{{ importProgressPercent.toFixed(1) }}%</span>
+          </div>
+
+          <UProgress :model-value="importProgressPercent" :max="100" />
+
+          <div class="text-xs text-muted">
+            Импортировано: {{ importProgress.processed_lines }} / {{ importProgress.total_lines || '...' }}, осталось: {{ importRemainingLines }}
+          </div>
         </div>
 
         <UAlert

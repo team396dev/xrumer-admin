@@ -82,6 +82,7 @@ func main() {
 	router.GET("/websites", crud.WebsiteListHandler(db))
 	router.GET("/websites/export", crud.WebsiteExportTSVHandler(db))
 	router.POST("/websites/accepted/import", crud.WebsiteBulkAcceptedImportHandler(db))
+	router.GET("/websites/accepted/import/:jobID", crud.WebsiteBulkAcceptedImportStatusHandler())
 	router.GET("/pages", crud.PageListHandler(db))
 	router.GET("/dashboard", crud.DashboardGetHandler(db))
 
