@@ -46,6 +46,13 @@
       Amount: item.Total
     }))
   })
+
+  const tagTable = computed(() => {
+    return (dashboard.value?.TagTable || []).map(item => ({
+      Tag: item.Name,
+      Amount: item.Total
+    }))
+  })
 </script>
 
 <template>
@@ -57,6 +64,12 @@
       <UPageCard :title="String(cards.toPlacement)" description="Сайтов под размещение" icon="i-lucide-circle-check-big"/>
       <UPageCard :title="String(cards.proxy)" description="Прокси" icon="i-lucide-network"/>
     </UPageGrid>
+    <UCard class="mt-5">
+      <template #header>
+        Статистика тегов
+      </template>
+      <UTable :data="tagTable" class="flex-1" />
+    </UCard>
     <UCard class="mt-5">
       <template #header>
         Статистика CMS

@@ -16,6 +16,11 @@ type cmsTotalRow struct {
 	Total int64  `gorm:"column:total"`
 }
 
+type websiteTagTotalRow struct {
+	Name  string `gorm:"column:name"`
+	Total int64  `gorm:"column:total"`
+}
+
 func DashboardGetHandler(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		dashboard, err := buildDashboard(db)
@@ -70,9 +75,27 @@ func buildDashboard(db *gorm.DB) (models.Dashboard, error) {
 		return models.Dashboard{}, err
 	}
 
+	tagRows := make([]websiteTagTotalRow, 0)
+	if err := db.Model(&models.WebsiteTag{}).
+		Select("website_tags.tag as name, COUNT(website_tag_websites.website_id) as total").
+		Joins("LEFT JOIN website_tag_websites ON website_tag_websites.website_tag_id = website_tags.id").
+		Group("website_tags.id, website_tags.tag").
+		Order("total DESC, website_tags.tag ASC").
+		Scan(&tagRows).Error; err != nil {
+		return models.Dashboard{}, err
+	}
+
 	cmsTable := make([]models.CmsTotal, 0, len(rows))
 	for _, row := range rows {
 		cmsTable = append(cmsTable, models.CmsTotal{
+			Name:  row.Name,
+			Total: uint(row.Total),
+		})
+	}
+
+	tagTable := make([]models.WebsiteTagTotal, 0, len(tagRows))
+	for _, row := range tagRows {
+		tagTable = append(tagTable, models.WebsiteTagTotal{
 			Name:  row.Name,
 			Total: uint(row.Total),
 		})
@@ -86,6 +109,7 @@ func buildDashboard(db *gorm.DB) (models.Dashboard, error) {
 		ProxyTotal:  proxyTotal,
 		ProxyValid:  0,
 		CmsTable:    cmsTable,
+		TagTable:    tagTable,
 	}, nil
 }
 

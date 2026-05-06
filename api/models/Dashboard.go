@@ -5,6 +5,11 @@ type CmsTotal struct {
 	Total uint
 }
 
+type WebsiteTagTotal struct {
+	Name  string
+	Total uint
+}
+
 type Dashboard struct {
 	Total       uint
 	Checked     uint
@@ -13,4 +18,5 @@ type Dashboard struct {
 	ProxyTotal  uint
 	ProxyValid  uint
 	CmsTable    []CmsTotal
+	TagTable    []WebsiteTagTotal
 }
