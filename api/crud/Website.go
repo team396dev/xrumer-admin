@@ -127,6 +127,8 @@ type websiteImportJob struct {
 	Message        string             `json:"message"`
 	TotalLines     int                `json:"total_lines"`
 	ProcessedLines int                `json:"processed_lines"`
+	TotalDomains   int                `json:"total_domains"`
+	ProcessedDomains int              `json:"processed_domains"`
 	UniqueDomains  int                `json:"unique_domains"`
 	Progress       float64            `json:"progress_percent"`
 	Error          string             `json:"error,omitempty"`
@@ -424,6 +426,8 @@ func snapshotWebsiteImportJob(job *websiteImportJob) gin.H {
 		"message":         job.Message,
 		"total_lines":     job.TotalLines,
 		"processed_lines": job.ProcessedLines,
+		"total_domains":   job.TotalDomains,
+		"processed_domains": job.ProcessedDomains,
 		"unique_domains":  job.UniqueDomains,
 		"progress_percent": job.Progress,
 		"created_at":      job.CreatedAt,
@@ -484,6 +488,7 @@ func runWebsiteImportJob(db *gorm.DB, job *websiteImportJob, stagedFilePath stri
 		j.Phase = "completed"
 		j.Message = "Импорт завершен"
 		j.Progress = 100
+		j.ProcessedDomains = j.TotalDomains
 		j.FinishedAt = &finished
 		j.Result = result
 	})
@@ -516,23 +521,21 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 		totalLines++
 		if len(record) == 0 {
-			if totalLines%1000 == 0 {
-				updateWebsiteImportJob(job, func(j *websiteImportJob) {
-					j.TotalLines = totalLines
-					j.ProcessedLines = totalLines
-				})
-			}
+		if totalLines%1000 == 0 {
+			updateWebsiteImportJob(job, func(j *websiteImportJob) {
+				j.ProcessedLines = totalLines
+			})
+		}
 			continue
 		}
 
 		domain := normalizeWebsiteDomain(record[0])
 		if domain == "" {
-			if totalLines%1000 == 0 {
-				updateWebsiteImportJob(job, func(j *websiteImportJob) {
-					j.TotalLines = totalLines
-					j.ProcessedLines = totalLines
-				})
-			}
+		if totalLines%1000 == 0 {
+			updateWebsiteImportJob(job, func(j *websiteImportJob) {
+				j.ProcessedLines = totalLines
+			})
+		}
 			continue
 		}
 
@@ -568,7 +571,6 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 		if totalLines%1000 == 0 {
 			updateWebsiteImportJob(job, func(j *websiteImportJob) {
-				j.TotalLines = totalLines
 				j.ProcessedLines = totalLines
 				j.UniqueDomains = len(domainTagsMap)
 			})
@@ -587,6 +589,8 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	updateWebsiteImportJob(job, func(j *websiteImportJob) {
 		j.TotalLines = totalLines
 		j.ProcessedLines = totalLines
+		j.TotalDomains = len(domains)
+		j.ProcessedDomains = 0
 		j.UniqueDomains = len(domains)
 		j.Phase = "db"
 		j.Message = "Обновление базы данных"
@@ -606,8 +610,10 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 		if (index+1)%25 == 0 || index+1 == len(domainChunks) {
 			progress := 35 + (15*float64(index+1))/float64(max(len(domainChunks), 1))
+			processedDomains := domainsFromChunkIndex(domainChunks, index)
 			updateWebsiteImportJob(job, func(j *websiteImportJob) {
 				j.Progress = progress
+				j.ProcessedDomains = processedDomains
 			})
 		}
 	}
@@ -618,7 +624,7 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	var websitesTagged int
 	var tagLinksCreated int
 
-	err = db.Transaction(func(tx *gorm.DB) error {
+		err = db.Transaction(func(tx *gorm.DB) error {
 		for index, domainChunk := range domainChunks {
 			chunkWebsites := make([]models.Website, 0, len(domainChunk))
 			for _, domain := range domainChunk {
@@ -637,8 +643,10 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 			if (index+1)%25 == 0 || index+1 == len(domainChunks) {
 				progress := 50 + (10*float64(index+1))/float64(max(len(domainChunks), 1))
+				processedDomains := domainsFromChunkIndex(domainChunks, index)
 				updateWebsiteImportJob(job, func(j *websiteImportJob) {
 					j.Progress = progress
+					j.ProcessedDomains = processedDomains
 				})
 			}
 		}
@@ -654,8 +662,10 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 			if (index+1)%25 == 0 || index+1 == len(domainChunks) {
 				progress := 60 + (10*float64(index+1))/float64(max(len(domainChunks), 1))
+				processedDomains := domainsFromChunkIndex(domainChunks, index)
 				updateWebsiteImportJob(job, func(j *websiteImportJob) {
 					j.Progress = progress
+					j.ProcessedDomains = processedDomains
 				})
 			}
 		}
@@ -785,6 +795,23 @@ func max(a, b int) int {
 	}
 
 	return b
+}
+
+func domainsFromChunkIndex(chunks [][]string, index int) int {
+	if index < 0 {
+		return 0
+	}
+
+	if index >= len(chunks) {
+		index = len(chunks) - 1
+	}
+
+	total := 0
+	for i := 0; i <= index; i++ {
+		total += len(chunks[i])
+	}
+
+	return total
 }
 
 func parseWebsiteTags(raw string) []string {

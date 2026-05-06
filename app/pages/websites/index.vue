@@ -29,12 +29,18 @@ const importProgress = reactive({
   message: '',
   total_lines: 0,
   processed_lines: 0,
+  total_domains: 0,
+  processed_domains: 0,
   progress_percent: 0,
   error: ''
 })
 let importStatusTimer = null
 
 const importRemainingLines = computed(() => {
+  if (importProgress.total_domains > 0) {
+    return Math.max(importProgress.total_domains - importProgress.processed_domains, 0)
+  }
+
   if (!importProgress.total_lines) {
     return 0
   }
@@ -44,6 +50,14 @@ const importRemainingLines = computed(() => {
 
 const importProgressPercent = computed(() => {
   return Number(importProgress.progress_percent || 0)
+})
+
+const importProcessedLabel = computed(() => {
+  if (importProgress.total_domains > 0) {
+    return `${importProgress.processed_domains} / ${importProgress.total_domains}`
+  }
+
+  return `${importProgress.processed_lines} / ${importProgress.total_lines || '...'}`
 })
 
 const page = ref(1)
@@ -249,6 +263,8 @@ function resetImportProgress() {
   importProgress.message = ''
   importProgress.total_lines = 0
   importProgress.processed_lines = 0
+  importProgress.total_domains = 0
+  importProgress.processed_domains = 0
   importProgress.progress_percent = 0
   importProgress.error = ''
 }
@@ -277,6 +293,8 @@ async function pollImportStatus() {
     importProgress.message = payload.message || ''
     importProgress.total_lines = Number(payload.total_lines || 0)
     importProgress.processed_lines = Number(payload.processed_lines || 0)
+    importProgress.total_domains = Number(payload.total_domains || 0)
+    importProgress.processed_domains = Number(payload.processed_domains || 0)
     importProgress.progress_percent = Number(payload.progress_percent || 0)
     importProgress.error = payload.error || ''
 
@@ -536,7 +554,7 @@ await loadWebsites()
           <UProgress :model-value="importProgressPercent" :max="100" />
 
           <div class="text-xs text-muted">
-            Импортировано: {{ importProgress.processed_lines }} / {{ importProgress.total_lines || '...' }}, осталось: {{ importRemainingLines }}
+            Импортировано: {{ importProcessedLabel }}, осталось: {{ importRemainingLines }}
           </div>
         </div>
 
