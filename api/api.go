@@ -59,7 +59,7 @@ func main() {
 		log.Fatalf("failed to connect to postgres: %v", err)
 	}
 
-	if err := db.AutoMigrate(&models.Website{}, &models.Page{}); err != nil {
+	if err := db.AutoMigrate(&models.Website{}, &models.Page{}, &models.WebsiteTag{}, &models.WebsiteTagWebsite{}); err != nil {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 

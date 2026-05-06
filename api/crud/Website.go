@@ -173,10 +173,16 @@ func WebsiteListHandler(db *gorm.DB) gin.HandlerFunc {
 
 		items := make([]websiteListItem, 0, len(websites))
 		for _, website := range websites {
-			tags := make([]string, 0, len(website.WebsiteTags))
+			tagSet := make(map[string]struct{}, len(website.WebsiteTags))
 			for _, websiteTag := range website.WebsiteTags {
-				tags = append(tags, websiteTag.Tag)
+				tagSet[websiteTag.Tag] = struct{}{}
 			}
+
+			tags := make([]string, 0, len(tagSet))
+			for tag := range tagSet {
+				tags = append(tags, tag)
+			}
+			sort.Strings(tags)
 
 			items = append(items, websiteListItem{
 				ID:        website.ID,

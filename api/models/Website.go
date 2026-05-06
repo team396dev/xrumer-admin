@@ -19,3 +19,12 @@ type WebsiteTag struct {
 	Tag      string    `gorm:"not null, unique"`
 	Websites []Website `gorm:"many2many:website_tag_websites;" json:"-"`
 }
+
+type WebsiteTagWebsite struct {
+	WebsiteID    uint `gorm:"not null;uniqueIndex:idx_website_tag_websites_unique"`
+	WebsiteTagID uint `gorm:"not null;uniqueIndex:idx_website_tag_websites_unique"`
+}
+
+func (WebsiteTagWebsite) TableName() string {
+	return "website_tag_websites"
+}
