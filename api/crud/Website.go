@@ -23,6 +23,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/gorm"
 )
@@ -878,6 +879,12 @@ func clearWebsiteImportStaging(db *gorm.DB, jobID string) error {
 	return db.Exec("DELETE FROM website_import_staging WHERE job_id = ?", jobID).Error
 }
 
+func toTextArray(tags []string) pgtype.TextArray {
+	var arr pgtype.TextArray
+	_ = arr.Set(tags)
+	return arr
+}
+
 func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImportStagingRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -898,7 +905,7 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 					pgx.Identifier{"website_import_staging"},
 					[]string{"job_id", "domain", "tags"},
 					pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {
-						return []any{jobID, rows[i].Domain, rows[i].Tags}, nil
+						return []any{jobID, rows[i].Domain, toTextArray(rows[i].Tags)}, nil
 					}),
 				)
 				if copyErr == nil {
@@ -918,7 +925,7 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 	placeholders := make([]string, 0, len(rows))
 	for _, row := range rows {
 		placeholders = append(placeholders, "(?, ?, ?)")
-		values = append(values, jobID, row.Domain, row.Tags)
+		values = append(values, jobID, row.Domain, toTextArray(row.Tags))
 	}
 
 	query := "INSERT INTO website_import_staging (job_id, domain, tags) VALUES " + strings.Join(placeholders, ",") + " ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags"
