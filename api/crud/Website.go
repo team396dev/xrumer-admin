@@ -886,31 +886,42 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 	ctx := context.Background()
 	if sqlDB, err := db.DB(); err == nil {
 		if conn, err := sqlDB.Conn(ctx); err == nil {
-			copied := false
 			err = conn.Raw(func(dc any) error {
 				stdlibConn, ok := dc.(*stdlib.Conn)
 				if !ok {
 					return errors.New("copy: not pgx stdlib connection")
 				}
 				pgxConn := stdlibConn.Conn()
-				_, copyErr := pgxConn.CopyFrom(ctx,
-					pgx.Identifier{"website_import_staging"},
-					[]string{"job_id", "domain", "tags"},
-					pgx.CopyFromRows(func() [][]interface{} {
-						data := make([][]interface{}, len(rows))
-						for i, r := range rows {
-							data[i] = []interface{}{jobID, r.Domain, r.Tags}
-						}
-						return data
-					}()),
-				)
-				if copyErr == nil {
-					copied = true
+
+				tempName := fmt.Sprintf("_tmp_web_import_%s", jobID)
+				if _, execErr := pgxConn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE IF NOT EXISTS %s (job_id text, domain text, tags text[]) ON COMMIT DROP", tempName)); execErr != nil {
+					return execErr
 				}
-				return copyErr
+
+				copyRows := make([][]any, len(rows))
+				for i, r := range rows {
+					copyRows[i] = []any{jobID, r.Domain, r.Tags}
+				}
+
+				if _, copyErr := pgxConn.CopyFrom(ctx,
+					pgx.Identifier{tempName},
+					[]string{"job_id", "domain", "tags"},
+					pgx.CopyFromRows(copyRows),
+				); copyErr != nil {
+					return copyErr
+				}
+
+				mergeSQL := fmt.Sprintf(`INSERT INTO website_import_staging (job_id, domain, tags)
+					SELECT job_id, domain, tags FROM %s
+					ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags`, tempName)
+				if _, mergeErr := pgxConn.Exec(ctx, mergeSQL); mergeErr != nil {
+					return mergeErr
+				}
+
+				return nil
 			})
 			conn.Close()
-			if copied {
+			if err == nil {
 				return nil
 			}
 		}
