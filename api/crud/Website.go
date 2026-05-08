@@ -23,7 +23,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/gorm"
 )
@@ -960,12 +959,8 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 	values := make([]any, 0, len(rows)*3)
 	placeholders := make([]string, 0, len(rows))
 	for _, row := range rows {
-		placeholders = append(placeholders, "(?, ?, ?)")
-
-		arr := pgtype.TextArray{}
-		_ = arr.Set(row.Tags)
-
-		values = append(values, jobID, row.Domain, arr)
+		placeholders = append(placeholders, "(?, ?, string_to_array(?, ',')::text[])")
+		values = append(values, jobID, row.Domain, strings.Join(row.Tags, ","))
 	}
 
 	query := "INSERT INTO website_import_staging (job_id, domain, tags) VALUES " + strings.Join(placeholders, ",") + " ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags"
