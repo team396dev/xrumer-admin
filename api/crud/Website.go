@@ -22,8 +22,8 @@ import (
 	"api/models"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/gorm"
 )
@@ -963,7 +963,6 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 		placeholders = append(placeholders, "(?, ?, ?)")
 
 		arr := pgtype.TextArray{}
-		// игнорируем ошибку, Set вернет ошибку только при несовместимом типе
 		_ = arr.Set(row.Tags)
 
 		values = append(values, jobID, row.Domain, arr)
