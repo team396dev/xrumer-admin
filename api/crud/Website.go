@@ -3,6 +3,7 @@ package crud
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
@@ -10,8 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,15 +22,17 @@ import (
 	"api/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
-	defaultPage    = 1
-	defaultPerPage = 20
-	maxPerPage     = 200
-	domainBatchSize = 500
+	defaultPage      = 1
+	defaultPerPage   = 20
+	maxPerPage       = 200
+	domainBatchSize  = 20000
+	stagingBatchSize = 5000
 )
 
 type websiteFilters struct {
@@ -116,26 +119,31 @@ type websiteTagWebsiteLink struct {
 	WebsiteTagID uint `gorm:"column:website_tag_id"`
 }
 
+type websiteImportStagingRow struct {
+	Domain string
+	Tags   []string
+}
+
 type websiteImportJob struct {
 	mu sync.RWMutex
 
-	ID             string             `json:"job_id"`
-	Status         string             `json:"status"`
-	Phase          string             `json:"phase"`
-	Type           string             `json:"type"`
-	Accepted       bool               `json:"accepted"`
-	Message        string             `json:"message"`
-	TotalLines     int                `json:"total_lines"`
-	ProcessedLines int                `json:"processed_lines"`
-	TotalDomains   int                `json:"total_domains"`
-	ProcessedDomains int              `json:"processed_domains"`
-	UniqueDomains  int                `json:"unique_domains"`
-	Progress       float64            `json:"progress_percent"`
-	Error          string             `json:"error,omitempty"`
-	Result         map[string]any     `json:"result,omitempty"`
-	CreatedAt      time.Time          `json:"created_at"`
-	StartedAt      *time.Time         `json:"started_at,omitempty"`
-	FinishedAt     *time.Time         `json:"finished_at,omitempty"`
+	ID               string         `json:"job_id"`
+	Status           string         `json:"status"`
+	Phase            string         `json:"phase"`
+	Type             string         `json:"type"`
+	Accepted         bool           `json:"accepted"`
+	Message          string         `json:"message"`
+	TotalLines       int            `json:"total_lines"`
+	ProcessedLines   int            `json:"processed_lines"`
+	TotalDomains     int            `json:"total_domains"`
+	ProcessedDomains int            `json:"processed_domains"`
+	UniqueDomains    int            `json:"unique_domains"`
+	Progress         float64        `json:"progress_percent"`
+	Error            string         `json:"error,omitempty"`
+	Result           map[string]any `json:"result,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	StartedAt        *time.Time     `json:"started_at,omitempty"`
+	FinishedAt       *time.Time     `json:"finished_at,omitempty"`
 }
 
 var websiteImportJobs = struct {
@@ -424,19 +432,19 @@ func snapshotWebsiteImportJob(job *websiteImportJob) gin.H {
 	defer job.mu.RUnlock()
 
 	snapshot := gin.H{
-		"job_id":          job.ID,
-		"status":          job.Status,
-		"phase":           job.Phase,
-		"type":            job.Type,
-		"accepted":        job.Accepted,
-		"message":         job.Message,
-		"total_lines":     job.TotalLines,
-		"processed_lines": job.ProcessedLines,
-		"total_domains":   job.TotalDomains,
+		"job_id":            job.ID,
+		"status":            job.Status,
+		"phase":             job.Phase,
+		"type":              job.Type,
+		"accepted":          job.Accepted,
+		"message":           job.Message,
+		"total_lines":       job.TotalLines,
+		"processed_lines":   job.ProcessedLines,
+		"total_domains":     job.TotalDomains,
 		"processed_domains": job.ProcessedDomains,
-		"unique_domains":  job.UniqueDomains,
-		"progress_percent": job.Progress,
-		"created_at":      job.CreatedAt,
+		"unique_domains":    job.UniqueDomains,
+		"progress_percent":  job.Progress,
+		"created_at":        job.CreatedAt,
 	}
 
 	if job.StartedAt != nil {
@@ -507,6 +515,13 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	}
 	defer file.Close()
 
+	if err := ensureWebsiteImportStagingTable(db); err != nil {
+		return nil, err
+	}
+	if err := clearWebsiteImportStaging(db, job.ID); err != nil {
+		return nil, err
+	}
+
 	reader := csv.NewReader(bufio.NewReader(file))
 	reader.Comma = '\t'
 	reader.FieldsPerRecord = -1
@@ -514,7 +529,21 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 	totalLines := 0
 	validDomains := 0
-	domainTagsMap := map[string][]string{}
+	batch := make([]websiteImportStagingRow, 0, stagingBatchSize)
+
+	flushBatch := func(force bool) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if !force && len(batch) < stagingBatchSize {
+			return nil
+		}
+		if err := bulkUpsertWebsiteImportStaging(db, job.ID, batch); err != nil {
+			return err
+		}
+		batch = batch[:0]
+		return nil
+	}
 
 	for {
 		record, readErr := reader.Read()
@@ -527,21 +556,21 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 		totalLines++
 		if len(record) == 0 {
-		if totalLines%1000 == 0 {
-			updateWebsiteImportJob(job, func(j *websiteImportJob) {
-				j.ProcessedLines = totalLines
-			})
-		}
+			if totalLines%20000 == 0 {
+				updateWebsiteImportJob(job, func(j *websiteImportJob) {
+					j.ProcessedLines = totalLines
+				})
+			}
 			continue
 		}
 
 		domain := normalizeWebsiteDomain(record[0])
 		if domain == "" {
-		if totalLines%1000 == 0 {
-			updateWebsiteImportJob(job, func(j *websiteImportJob) {
-				j.ProcessedLines = totalLines
-			})
-		}
+			if totalLines%20000 == 0 {
+				updateWebsiteImportJob(job, func(j *websiteImportJob) {
+					j.ProcessedLines = totalLines
+				})
+			}
 			continue
 		}
 
@@ -558,234 +587,136 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 			tags = parseWebsiteTags(record[1])
 		}
 
-		existingTags := domainTagsMap[domain]
-		tagSet := map[string]struct{}{}
-		for _, tag := range existingTags {
-			tagSet[tag] = struct{}{}
-		}
-		for _, tag := range tags {
-			tagSet[tag] = struct{}{}
-		}
+		batch = append(batch, websiteImportStagingRow{Domain: domain, Tags: tags})
 
-		merged := make([]string, 0, len(tagSet))
-		for tag := range tagSet {
-			merged = append(merged, tag)
+		if len(batch) >= stagingBatchSize {
+			if err := flushBatch(false); err != nil {
+				return nil, err
+			}
 		}
 
-		sort.Strings(merged)
-		domainTagsMap[domain] = merged
-
-		if totalLines%1000 == 0 {
+		if totalLines%20000 == 0 {
 			updateWebsiteImportJob(job, func(j *websiteImportJob) {
 				j.ProcessedLines = totalLines
-				j.UniqueDomains = len(domainTagsMap)
 			})
 		}
 	}
 
-	if len(domainTagsMap) == 0 {
-		return nil, errors.New("no valid domains found in file")
+	if err := flushBatch(true); err != nil {
+		return nil, err
 	}
 
-	domains := make([]string, 0, len(domainTagsMap))
-	for domain := range domainTagsMap {
-		domains = append(domains, domain)
+	var uniqueDomains int64
+	if err := db.Raw("SELECT COUNT(*) FROM website_import_staging WHERE job_id = ?", job.ID).Scan(&uniqueDomains).Error; err != nil {
+		return nil, errors.New("failed to count staging domains")
+	}
+	if uniqueDomains == 0 {
+		return nil, errors.New("no valid domains found in file")
 	}
 
 	updateWebsiteImportJob(job, func(j *websiteImportJob) {
 		j.TotalLines = totalLines
 		j.ProcessedLines = totalLines
-		j.TotalDomains = len(domains)
+		j.TotalDomains = int(uniqueDomains)
 		j.ProcessedDomains = 0
-		j.UniqueDomains = len(domains)
+		j.UniqueDomains = int(uniqueDomains)
 		j.Phase = "db"
 		j.Message = "Обновление базы данных"
 		j.Progress = 35
 	})
 
 	var matchedDomains int64
-	domainChunks := splitStringSliceIntoChunks(domains, domainBatchSize)
-	for index, domainChunk := range domainChunks {
-		var chunkCount int64
-		if err := db.Model(&models.Website{}).
-			Where("domain IN ?", domainChunk).
-			Count(&chunkCount).Error; err != nil {
-			return nil, errors.New("failed to match domains")
-		}
-		matchedDomains += chunkCount
-
-		if (index+1)%25 == 0 || index+1 == len(domainChunks) {
-			progress := 35 + (15*float64(index+1))/float64(max(len(domainChunks), 1))
-			processedDomains := domainsFromChunkIndex(domainChunks, index)
-			updateWebsiteImportJob(job, func(j *websiteImportJob) {
-				j.Progress = progress
-				j.ProcessedDomains = processedDomains
-			})
-		}
+	if err := db.Raw("SELECT COUNT(*) FROM websites w JOIN website_import_staging s ON s.job_id = ? AND s.domain = w.domain", job.ID).Scan(&matchedDomains).Error; err != nil {
+		return nil, errors.New("failed to match domains")
 	}
 
-	var updatedRows int64
-	var createdDomains int
-	var tagsCreated int
-	var websitesTagged int
-	var tagLinksCreated int
-
-		err = db.Transaction(func(tx *gorm.DB) error {
-		for index, domainChunk := range domainChunks {
-			chunkWebsites := make([]models.Website, 0, len(domainChunk))
-			for _, domain := range domainChunk {
-				chunkWebsites = append(chunkWebsites, models.Website{
-					Domain:   domain,
-					Accepted: job.Accepted,
-				})
-			}
-
-			createResult := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunkWebsites)
-			if createResult.Error != nil {
-				return createResult.Error
-			}
-
-			createdDomains += int(createResult.RowsAffected)
-
-			if (index+1)%25 == 0 || index+1 == len(domainChunks) {
-				progress := 50 + (10*float64(index+1))/float64(max(len(domainChunks), 1))
-				processedDomains := domainsFromChunkIndex(domainChunks, index)
-				updateWebsiteImportJob(job, func(j *websiteImportJob) {
-					j.Progress = progress
-					j.ProcessedDomains = processedDomains
-				})
-			}
-		}
-
-		for index, domainChunk := range domainChunks {
-			updateResult := tx.Model(&models.Website{}).
-				Where("domain IN ?", domainChunk).
-				Update("accepted", job.Accepted)
-			if updateResult.Error != nil {
-				return updateResult.Error
-			}
-			updatedRows += updateResult.RowsAffected
-
-			if (index+1)%25 == 0 || index+1 == len(domainChunks) {
-				progress := 60 + (10*float64(index+1))/float64(max(len(domainChunks), 1))
-				processedDomains := domainsFromChunkIndex(domainChunks, index)
-				updateWebsiteImportJob(job, func(j *websiteImportJob) {
-					j.Progress = progress
-					j.ProcessedDomains = processedDomains
-				})
-			}
-		}
-
-		allTagsSet := map[string]struct{}{}
-		for _, tags := range domainTagsMap {
-			for _, tag := range tags {
-				allTagsSet[tag] = struct{}{}
-			}
-		}
-
-		allTags := make([]string, 0, len(allTagsSet))
-		for tag := range allTagsSet {
-			allTags = append(allTags, tag)
-		}
-
-		tagsByValue := map[string]models.WebsiteTag{}
-		if len(allTags) > 0 {
-			tagChunks := splitStringSliceIntoChunks(allTags, domainBatchSize)
-			for _, tagChunk := range tagChunks {
-				newTags := make([]models.WebsiteTag, 0, len(tagChunk))
-				for _, tag := range tagChunk {
-					newTags = append(newTags, models.WebsiteTag{Tag: tag})
-				}
-
-				createTagsResult := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newTags)
-				if createTagsResult.Error != nil {
-					return createTagsResult.Error
-				}
-				tagsCreated += int(createTagsResult.RowsAffected)
-			}
-
-			for _, tagChunk := range tagChunks {
-				chunkTags := []models.WebsiteTag{}
-				if err := tx.Where("tag IN ?", tagChunk).Find(&chunkTags).Error; err != nil {
-					return err
-				}
-				for _, tag := range chunkTags {
-					tagsByValue[tag.Tag] = tag
-				}
-			}
-		}
-
-		if len(tagsByValue) == 0 {
-			return nil
-		}
-
-		websiteRows := []websiteDomainRow{}
-		for _, domainChunk := range domainChunks {
-			chunkRows := []websiteDomainRow{}
-			if err := tx.Model(&models.Website{}).
-				Select("id, domain").
-				Where("domain IN ?", domainChunk).
-				Find(&chunkRows).Error; err != nil {
-				return err
-			}
-			websiteRows = append(websiteRows, chunkRows...)
-		}
-
-		websiteIDByDomain := make(map[string]uint, len(websiteRows))
-		for _, row := range websiteRows {
-			websiteIDByDomain[row.Domain] = row.ID
-		}
-
-		links := make([]websiteTagWebsiteLink, 0)
-		for domain, tagNames := range domainTagsMap {
-			websiteID, exists := websiteIDByDomain[domain]
-			if !exists || len(tagNames) == 0 {
-				continue
-			}
-
-			linksForWebsite := 0
-			for _, tagName := range tagNames {
-				tag, tagExists := tagsByValue[tagName]
-				if !tagExists {
-					continue
-				}
-
-				links = append(links, websiteTagWebsiteLink{
-					WebsiteID:    websiteID,
-					WebsiteTagID: tag.ID,
-				})
-				linksForWebsite++
-			}
-
-			if linksForWebsite > 0 {
-				websitesTagged++
-				tagLinksCreated += linksForWebsite
-			}
-		}
-
-		if len(links) > 0 {
-			for _, linksChunk := range splitWebsiteTagLinksIntoChunks(links, domainBatchSize*4) {
-				if err := tx.Table("website_tag_websites").
-					Clauses(clause.OnConflict{DoNothing: true}).
-					Create(&linksChunk).Error; err != nil {
-					return err
-				}
-			}
-		}
-
-		return nil
+	updateWebsiteImportJob(job, func(j *websiteImportJob) {
+		j.Progress = 50
+		j.ProcessedDomains = int(matchedDomains)
 	})
 
-	if err != nil {
-		return nil, errors.New("failed to update websites")
+	var updatedRows int64
+	var createdDomains int64
+	var tagsCreated int64
+	var websitesTagged int64
+	var tagLinksCreated int64
+
+	tx := db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
 	}
+
+	insertRes := tx.Exec(`INSERT INTO websites (domain, accepted, created_at, updated_at)
+		SELECT s.domain, ?, NOW(), NOW()
+		FROM website_import_staging s
+		WHERE s.job_id = ?
+		ON CONFLICT (domain) DO NOTHING`, job.Accepted, job.ID)
+	if insertRes.Error != nil {
+		tx.Rollback()
+		return nil, insertRes.Error
+	}
+	createdDomains = insertRes.RowsAffected
+
+	updateRes := tx.Exec(`UPDATE websites w
+		SET accepted = ?, updated_at = NOW()
+		FROM website_import_staging s
+		WHERE s.job_id = ? AND w.domain = s.domain`, job.Accepted, job.ID)
+	if updateRes.Error != nil {
+		tx.Rollback()
+		return nil, updateRes.Error
+	}
+	updatedRows = updateRes.RowsAffected
+
+	insertTagsRes := tx.Exec(`INSERT INTO website_tags (tag, created_at, updated_at)
+		SELECT DISTINCT tag, NOW(), NOW()
+		FROM (SELECT UNNEST(tags) AS tag FROM website_import_staging WHERE job_id = ?) t
+		WHERE tag IS NOT NULL AND tag <> ''
+		ON CONFLICT (tag) DO NOTHING`, job.ID)
+	if insertTagsRes.Error != nil {
+		tx.Rollback()
+		return nil, insertTagsRes.Error
+	}
+	tagsCreated = insertTagsRes.RowsAffected
+
+	linkRes := tx.Exec(`INSERT INTO website_tag_websites (website_id, website_tag_id)
+		SELECT w.id, wt.id
+		FROM website_import_staging s
+		JOIN websites w ON w.domain = s.domain
+		JOIN LATERAL UNNEST(s.tags) AS t(tag) ON TRUE
+		JOIN website_tags wt ON wt.tag = t.tag
+		WHERE s.job_id = ? AND t.tag IS NOT NULL AND t.tag <> ''
+		ON CONFLICT DO NOTHING`, job.ID)
+	if linkRes.Error != nil {
+		tx.Rollback()
+		return nil, linkRes.Error
+	}
+	tagLinksCreated = linkRes.RowsAffected
+
+	if err := tx.Raw(`SELECT COUNT(DISTINCT w.id)
+		FROM website_import_staging s
+		JOIN websites w ON w.domain = s.domain
+		WHERE s.job_id = ?`, job.ID).Scan(&websitesTagged).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+
+	updateWebsiteImportJob(job, func(j *websiteImportJob) {
+		j.Progress = 90
+		j.ProcessedDomains = int(uniqueDomains)
+	})
+
+	_ = clearWebsiteImportStaging(db, job.ID)
 
 	return map[string]any{
 		"type":            job.Type,
 		"accepted":        job.Accepted,
 		"total_lines":     totalLines,
 		"valid_domains":   validDomains,
-		"unique_domains":  len(domains),
+		"unique_domains":  int(uniqueDomains),
 		"matched_domains": matchedDomains,
 		"created_domains": createdDomains,
 		"updated_rows":    updatedRows,
@@ -928,6 +859,70 @@ func splitWebsiteTagLinksIntoChunks(items []websiteTagWebsiteLink, chunkSize int
 	}
 
 	return chunks
+}
+
+func ensureWebsiteImportStagingTable(db *gorm.DB) error {
+	return db.Exec(`
+		CREATE TABLE IF NOT EXISTS website_import_staging (
+			job_id TEXT NOT NULL,
+			domain TEXT NOT NULL,
+			tags TEXT[],
+			PRIMARY KEY (job_id, domain)
+		);
+		CREATE INDEX IF NOT EXISTS idx_website_import_staging_job ON website_import_staging(job_id);
+		CREATE INDEX IF NOT EXISTS idx_website_import_staging_domain ON website_import_staging(domain);
+	`).Error
+}
+
+func clearWebsiteImportStaging(db *gorm.DB, jobID string) error {
+	return db.Exec("DELETE FROM website_import_staging WHERE job_id = ?", jobID).Error
+}
+
+func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImportStagingRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// Try pgx CopyFrom via underlying connection (gorm postgres driver uses pgx stdlib)
+	ctx := context.Background()
+	if sqlDB, err := db.DB(); err == nil {
+		if conn, err := sqlDB.Conn(ctx); err == nil {
+			copied := false
+			err = conn.Raw(func(dc any) error {
+				stdlibConn, ok := dc.(*stdlib.Conn)
+				if !ok {
+					return errors.New("copy: not pgx stdlib connection")
+				}
+				pgxConn := stdlibConn.Conn()
+				_, copyErr := pgxConn.CopyFrom(ctx,
+					pgx.Identifier{"website_import_staging"},
+					[]string{"job_id", "domain", "tags"},
+					pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {
+						return []any{jobID, rows[i].Domain, rows[i].Tags}, nil
+					}),
+				)
+				if copyErr == nil {
+					copied = true
+				}
+				return copyErr
+			})
+			conn.Close()
+			if copied {
+				return nil
+			}
+		}
+	}
+
+	// Fallback to batch inserts when COPY is unavailable
+	values := make([]any, 0, len(rows)*3)
+	placeholders := make([]string, 0, len(rows))
+	for _, row := range rows {
+		placeholders = append(placeholders, "(?, ?, ?)")
+		values = append(values, jobID, row.Domain, row.Tags)
+	}
+
+	query := "INSERT INTO website_import_staging (job_id, domain, tags) VALUES " + strings.Join(placeholders, ",") + " ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags"
+	return db.Exec(query, values...).Error
 }
 
 func parseWebsiteExportType(raw string) (websiteExportType, error) {
