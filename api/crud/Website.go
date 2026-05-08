@@ -518,6 +518,11 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	if err := ensureWebsiteImportStagingTable(db); err != nil {
 		return nil, err
 	}
+
+	// Гарантируем уникальность доменов, чтобы ON CONFLICT (domain) работал
+	if err := ensureWebsitesDomainUnique(db); err != nil {
+		return nil, err
+	}
 	if err := clearWebsiteImportStaging(db, job.ID); err != nil {
 		return nil, err
 	}
@@ -872,6 +877,10 @@ func ensureWebsiteImportStagingTable(db *gorm.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_website_import_staging_job ON website_import_staging(job_id);
 		CREATE INDEX IF NOT EXISTS idx_website_import_staging_domain ON website_import_staging(domain);
 	`).Error
+}
+
+func ensureWebsitesDomainUnique(db *gorm.DB) error {
+	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_websites_domain_unique ON websites(domain)`).Error
 }
 
 func clearWebsiteImportStaging(db *gorm.DB, jobID string) error {
