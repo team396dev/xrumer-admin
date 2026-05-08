@@ -22,6 +22,7 @@ import (
 	"api/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/gorm"
@@ -883,6 +884,35 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 		return nil
 	}
 
+	// Дедупликация доменов внутри батча и объединение тегов, чтобы не ловить конфликт первичного ключа
+	dedup := make(map[string]map[string]struct{}, len(rows))
+	order := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.Domain == "" {
+			continue
+		}
+		if _, exists := dedup[r.Domain]; !exists {
+			dedup[r.Domain] = map[string]struct{}{}
+			order = append(order, r.Domain)
+		}
+		for _, t := range r.Tags {
+			if strings.TrimSpace(t) == "" {
+				continue
+			}
+			dedup[r.Domain][t] = struct{}{}
+		}
+	}
+
+	rows = rows[:0]
+	for _, domain := range order {
+		tags := make([]string, 0, len(dedup[domain]))
+		for t := range dedup[domain] {
+			tags = append(tags, t)
+		}
+		sort.Strings(tags)
+		rows = append(rows, websiteImportStagingRow{Domain: domain, Tags: tags})
+	}
+
 	ctx := context.Background()
 	if sqlDB, err := db.DB(); err == nil {
 		if conn, err := sqlDB.Conn(ctx); err == nil {
@@ -912,8 +942,8 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 				}
 
 				mergeSQL := fmt.Sprintf(`INSERT INTO website_import_staging (job_id, domain, tags)
-					SELECT job_id, domain, tags FROM %s
-					ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags`, tempName)
+                    SELECT job_id, domain, tags FROM %s
+                    ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags`, tempName)
 				if _, mergeErr := pgxConn.Exec(ctx, mergeSQL); mergeErr != nil {
 					return mergeErr
 				}
@@ -931,7 +961,12 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 	placeholders := make([]string, 0, len(rows))
 	for _, row := range rows {
 		placeholders = append(placeholders, "(?, ?, ?)")
-		values = append(values, jobID, row.Domain, row.Tags)
+
+		arr := pgtype.TextArray{}
+		// игнорируем ошибку, Set вернет ошибку только при несовместимом типе
+		_ = arr.Set(row.Tags)
+
+		values = append(values, jobID, row.Domain, arr)
 	}
 
 	query := "INSERT INTO website_import_staging (job_id, domain, tags) VALUES " + strings.Join(placeholders, ",") + " ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags"
