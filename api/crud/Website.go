@@ -32,7 +32,7 @@ const (
 	defaultPerPage   = 20
 	maxPerPage       = 200
 	domainBatchSize  = 20000
-	stagingBatchSize = 5000
+	stagingBatchSize = 50000
 )
 
 type websiteFilters struct {
