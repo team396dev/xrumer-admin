@@ -626,13 +626,17 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	})
 
 	var matchedDomains int64
-	if err := db.Raw("SELECT COUNT(*) FROM websites w JOIN website_import_staging s ON s.job_id = ? AND s.domain = w.domain", job.ID).Scan(&matchedDomains).Error; err != nil {
+	if err := db.Raw("SELECT COUNT(DISTINCT w.id) FROM websites w JOIN website_import_staging s ON s.job_id = ? AND s.domain = w.domain", job.ID).Scan(&matchedDomains).Error; err != nil {
 		return nil, errors.New("failed to match domains")
 	}
 
 	updateWebsiteImportJob(job, func(j *websiteImportJob) {
 		j.Progress = 50
-		j.ProcessedDomains = int(matchedDomains)
+		if matchedDomains > uniqueDomains {
+			j.ProcessedDomains = int(uniqueDomains)
+		} else {
+			j.ProcessedDomains = int(matchedDomains)
+		}
 	})
 
 	var updatedRows int64
@@ -668,10 +672,12 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	updatedRows = updateRes.RowsAffected
 
 	insertTagsRes := tx.Exec(`INSERT INTO website_tags (tag, created_at, updated_at)
-		SELECT DISTINCT tag, NOW(), NOW()
-		FROM (SELECT UNNEST(tags) AS tag FROM website_import_staging WHERE job_id = ?) t
-		WHERE tag IS NOT NULL AND tag <> ''
-		ON CONFLICT (tag) DO NOTHING`, job.ID)
+		SELECT t.tag, NOW(), NOW()
+		FROM (
+			SELECT DISTINCT UNNEST(tags) AS tag FROM website_import_staging WHERE job_id = ?
+		) t
+		LEFT JOIN website_tags wt ON wt.tag = t.tag
+		WHERE t.tag IS NOT NULL AND t.tag <> '' AND wt.id IS NULL`, job.ID)
 	if insertTagsRes.Error != nil {
 		tx.Rollback()
 		return nil, insertTagsRes.Error
@@ -684,8 +690,8 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 		JOIN websites w ON w.domain = s.domain
 		JOIN LATERAL UNNEST(s.tags) AS t(tag) ON TRUE
 		JOIN website_tags wt ON wt.tag = t.tag
-		WHERE s.job_id = ? AND t.tag IS NOT NULL AND t.tag <> ''
-		ON CONFLICT DO NOTHING`, job.ID)
+		LEFT JOIN website_tag_websites l ON l.website_id = w.id AND l.website_tag_id = wt.id
+		WHERE s.job_id = ? AND t.tag IS NOT NULL AND t.tag <> '' AND l.website_id IS NULL`, job.ID)
 	if linkRes.Error != nil {
 		tx.Rollback()
 		return nil, linkRes.Error
