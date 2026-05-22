@@ -164,7 +164,8 @@ const tableRows = computed(() => {
     Язык: (item.Lang ?? item.lang) || '—',
     Форум: (item.IsForum ?? item.is_forum) ? 'Да' : 'Нет',
     Статус: item.Status ?? item.status,
-    Принят: (item.Accepted ?? item.accepted) ? 'Да' : 'Нет'
+    Принят: (item.Accepted ?? item.accepted) ? 'Да' : 'Нет',
+    Страниц: item.pages_count ?? 0
   }))
 })
 
@@ -569,8 +570,8 @@ await loadWebsites()
           v-if="importResult"
           color="success"
           variant="soft"
-          :title="`Обновлено: ${importResult.updated_rows}`"
-          :description="`Строк: ${importResult.total_lines}, валидных доменов: ${importResult.valid_domains}, совпало в БД: ${importResult.matched_domains}, новых доменов: ${importResult.created_domains || 0}, создано тегов: ${importResult.tags_created || 0}, сайтов с тегами: ${importResult.websites_tagged || 0}`"
+          title="Импорт завершён"
+          :description="`Строк: ${importResult.total_lines}, URL: ${importResult.valid_urls}, уникальных: ${importResult.unique_urls}, доменов: ${importResult.unique_domains} | Доменов создано: ${importResult.created_domains || 0}, обновлено: ${importResult.updated_domains || 0} | Страниц создано: ${importResult.created_pages || 0}, обновлено: ${importResult.updated_pages || 0} | Тегов создано: ${importResult.tags_created || 0}`"
         />
       </div>
     </template>

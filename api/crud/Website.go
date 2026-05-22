@@ -59,17 +59,18 @@ type websiteListResponse struct {
 }
 
 type websiteListItem struct {
-	ID        uint       `json:"id"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty"`
-	Domain    string     `json:"domain"`
-	CMS       string     `json:"cms"`
-	IsForum   bool       `json:"is_forum"`
-	Lang      string     `json:"lang"`
-	Status    int        `json:"status"`
-	Accepted  bool       `json:"accepted"`
-	Tags      []string   `json:"tags"`
+	ID         uint       `json:"id"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
+	Domain     string     `json:"domain"`
+	CMS        string     `json:"cms"`
+	IsForum    bool       `json:"is_forum"`
+	Lang       string     `json:"lang"`
+	Status     int        `json:"status"`
+	Accepted   bool       `json:"accepted"`
+	Tags       []string   `json:"tags"`
+	PagesCount int64      `json:"pages_count"`
 }
 
 type valueCountString struct {
@@ -120,6 +121,7 @@ type websiteTagWebsiteLink struct {
 }
 
 type websiteImportStagingRow struct {
+	URL    string
 	Domain string
 	Tags   []string
 }
@@ -179,6 +181,31 @@ func WebsiteListHandler(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
+		websiteIDs := make([]uint, len(websites))
+		for i, w := range websites {
+			websiteIDs[i] = w.ID
+		}
+
+		type pagesCountRow struct {
+			WebsiteID  uint  `gorm:"column:website_id"`
+			PagesCount int64 `gorm:"column:pages_count"`
+		}
+		pagesCountRows := make([]pagesCountRow, 0, len(websiteIDs))
+		if len(websiteIDs) > 0 {
+			if err := db.Model(&models.Page{}).
+				Select("website_id, COUNT(*) as pages_count").
+				Where("website_id IN ?", websiteIDs).
+				Group("website_id").
+				Scan(&pagesCountRows).Error; err != nil {
+				c.JSON(500, gin.H{"error": "failed to count pages"})
+				return
+			}
+		}
+		pagesCountByWebsiteID := make(map[uint]int64, len(pagesCountRows))
+		for _, r := range pagesCountRows {
+			pagesCountByWebsiteID[r.WebsiteID] = r.PagesCount
+		}
+
 		items := make([]websiteListItem, 0, len(websites))
 		for _, website := range websites {
 			tagSet := make(map[string]struct{}, len(website.WebsiteTags))
@@ -193,16 +220,17 @@ func WebsiteListHandler(db *gorm.DB) gin.HandlerFunc {
 			sort.Strings(tags)
 
 			items = append(items, websiteListItem{
-				ID:        website.ID,
-				CreatedAt: website.CreatedAt,
-				UpdatedAt: website.UpdatedAt,
-				Domain:    website.Domain,
-				CMS:       website.CMS,
-				IsForum:   website.IsForum,
-				Lang:      website.Lang,
-				Status:    website.Status,
-				Accepted:  website.Accepted,
-				Tags:      tags,
+				ID:         website.ID,
+				CreatedAt:  website.CreatedAt,
+				UpdatedAt:  website.UpdatedAt,
+				Domain:     website.Domain,
+				CMS:        website.CMS,
+				IsForum:    website.IsForum,
+				Lang:       website.Lang,
+				Status:     website.Status,
+				Accepted:   website.Accepted,
+				Tags:       tags,
+				PagesCount: pagesCountByWebsiteID[website.ID],
 			})
 
 			if website.DeletedAt.Valid {
@@ -528,7 +556,7 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 	reader.LazyQuotes = true
 
 	totalLines := 0
-	validDomains := 0
+	validURLs := 0
 	batch := make([]websiteImportStagingRow, 0, stagingBatchSize)
 
 	flushBatch := func(force bool) error {
@@ -557,37 +585,31 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 		totalLines++
 		if len(record) == 0 {
 			if totalLines%20000 == 0 {
-				updateWebsiteImportJob(job, func(j *websiteImportJob) {
-					j.ProcessedLines = totalLines
-				})
+				updateWebsiteImportJob(job, func(j *websiteImportJob) { j.ProcessedLines = totalLines })
 			}
 			continue
 		}
 
-		domain := normalizeWebsiteDomain(record[0])
-		if domain == "" {
+		domain, pageURL := normalizeImportLine(record[0])
+		if domain == "" || pageURL == "" {
 			if totalLines%20000 == 0 {
-				updateWebsiteImportJob(job, func(j *websiteImportJob) {
-					j.ProcessedLines = totalLines
-				})
+				updateWebsiteImportJob(job, func(j *websiteImportJob) { j.ProcessedLines = totalLines })
 			}
 			continue
 		}
 
-		if totalLines == 1 {
-			if domain == "domain" || domain == "домен" {
-				continue
-			}
+		if totalLines == 1 && (domain == "domain" || domain == "домен") {
+			continue
 		}
 
-		validDomains++
+		validURLs++
 
 		tags := []string{}
 		if len(record) > 1 {
 			tags = parseWebsiteTags(record[1])
 		}
 
-		batch = append(batch, websiteImportStagingRow{Domain: domain, Tags: tags})
+		batch = append(batch, websiteImportStagingRow{URL: pageURL, Domain: domain, Tags: tags})
 
 		if len(batch) >= stagingBatchSize {
 			if err := flushBatch(false); err != nil {
@@ -596,9 +618,7 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 		}
 
 		if totalLines%20000 == 0 {
-			updateWebsiteImportJob(job, func(j *websiteImportJob) {
-				j.ProcessedLines = totalLines
-			})
+			updateWebsiteImportJob(job, func(j *websiteImportJob) { j.ProcessedLines = totalLines })
 		}
 	}
 
@@ -606,18 +626,23 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 		return nil, err
 	}
 
-	var uniqueDomains int64
-	if err := db.Raw("SELECT COUNT(*) FROM website_import_staging WHERE job_id = ?", job.ID).Scan(&uniqueDomains).Error; err != nil {
-		return nil, errors.New("failed to count staging domains")
+	var uniqueURLs int64
+	if err := db.Raw("SELECT COUNT(*) FROM website_import_staging WHERE job_id = ?", job.ID).Scan(&uniqueURLs).Error; err != nil {
+		return nil, errors.New("failed to count staging urls")
 	}
-	if uniqueDomains == 0 {
-		return nil, errors.New("no valid domains found in file")
+	if uniqueURLs == 0 {
+		return nil, errors.New("no valid urls found in file")
+	}
+
+	var uniqueDomains int64
+	if err := db.Raw("SELECT COUNT(DISTINCT domain) FROM website_import_staging WHERE job_id = ?", job.ID).Scan(&uniqueDomains).Error; err != nil {
+		return nil, errors.New("failed to count staging domains")
 	}
 
 	updateWebsiteImportJob(job, func(j *websiteImportJob) {
 		j.TotalLines = totalLines
 		j.ProcessedLines = totalLines
-		j.TotalDomains = int(uniqueDomains)
+		j.TotalDomains = int(uniqueURLs)
 		j.ProcessedDomains = 0
 		j.UniqueDomains = int(uniqueDomains)
 		j.Phase = "db"
@@ -625,86 +650,146 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 		j.Progress = 35
 	})
 
-	var matchedDomains int64
-	if err := db.Raw("SELECT COUNT(DISTINCT w.id) FROM websites w JOIN website_import_staging s ON s.job_id = ? AND s.domain = w.domain", job.ID).Scan(&matchedDomains).Error; err != nil {
-		return nil, errors.New("failed to match domains")
-	}
-
-	updateWebsiteImportJob(job, func(j *websiteImportJob) {
-		j.Progress = 50
-		if matchedDomains > uniqueDomains {
-			j.ProcessedDomains = int(uniqueDomains)
-		} else {
-			j.ProcessedDomains = int(matchedDomains)
-		}
-	})
-
-	var updatedRows int64
 	var createdDomains int64
+	var updatedDomains int64
+	var createdPages int64
+	var updatedPages int64
 	var tagsCreated int64
-	var websitesTagged int64
-	var tagLinksCreated int64
+	var pageTagsCreated int64
+	var websiteTagLinks int64
+	var pageTagLinks int64
 
 	tx := db.Begin()
 	if tx.Error != nil {
 		return nil, tx.Error
 	}
 
-	insertRes := tx.Exec(`INSERT INTO websites (domain, accepted, created_at, updated_at)
-		SELECT s.domain, ?, NOW(), NOW()
+	// Step 3: domains
+	insertDomainsRes := tx.Exec(`INSERT INTO websites (domain, accepted, created_at, updated_at)
+		SELECT DISTINCT s.domain, ?, NOW(), NOW()
 		FROM website_import_staging s
 		LEFT JOIN websites w ON w.domain = s.domain
-		WHERE s.job_id = ? AND w.id IS NULL`, job.Accepted, job.ID)
-	if insertRes.Error != nil {
+		WHERE s.job_id = ? AND w.id IS NULL
+		ON CONFLICT (domain) DO NOTHING`, job.Accepted, job.ID)
+	if insertDomainsRes.Error != nil {
 		tx.Rollback()
-		return nil, insertRes.Error
+		return nil, insertDomainsRes.Error
 	}
-	createdDomains = insertRes.RowsAffected
+	createdDomains = insertDomainsRes.RowsAffected
 
-	updateRes := tx.Exec(`UPDATE websites w
-		SET accepted = ?, updated_at = NOW()
+	if job.Accepted {
+		updateDomainsRes := tx.Exec(`UPDATE websites w
+			SET accepted = true, updated_at = NOW()
+			FROM (SELECT DISTINCT domain FROM website_import_staging WHERE job_id = ?) s
+			WHERE w.domain = s.domain AND w.accepted = false`, job.ID)
+		if updateDomainsRes.Error != nil {
+			tx.Rollback()
+			return nil, updateDomainsRes.Error
+		}
+		updatedDomains = updateDomainsRes.RowsAffected
+	}
+
+	updateWebsiteImportJob(job, func(j *websiteImportJob) { j.Progress = 50 })
+
+	// Step 4: pages (only rows where url <> domain)
+	if job.Accepted {
+		updatePagesRes := tx.Exec(`UPDATE pages p
+			SET accepted = true, updated_at = NOW()
+			FROM website_import_staging s
+			WHERE s.job_id = ? AND s.url = p.target_uri AND s.url <> s.domain AND p.accepted = false`, job.ID)
+		if updatePagesRes.Error != nil {
+			tx.Rollback()
+			return nil, updatePagesRes.Error
+		}
+		updatedPages = updatePagesRes.RowsAffected
+	}
+
+	insertPagesRes := tx.Exec(`INSERT INTO pages (target_uri, website_id, accepted, created_at, updated_at)
+		SELECT s.url, w.id, ?, NOW(), NOW()
 		FROM website_import_staging s
-		WHERE s.job_id = ? AND w.domain = s.domain`, job.Accepted, job.ID)
-	if updateRes.Error != nil {
+		JOIN websites w ON w.domain = s.domain
+		LEFT JOIN pages p ON p.target_uri = s.url
+		WHERE s.job_id = ? AND s.url <> s.domain AND p.id IS NULL
+		ON CONFLICT (target_uri) DO NOTHING`, job.Accepted, job.ID)
+	if insertPagesRes.Error != nil {
 		tx.Rollback()
-		return nil, updateRes.Error
+		return nil, insertPagesRes.Error
 	}
-	updatedRows = updateRes.RowsAffected
+	createdPages = insertPagesRes.RowsAffected
 
-	insertTagsRes := tx.Exec(`INSERT INTO website_tags (tag, created_at, updated_at)
+	updateWebsiteImportJob(job, func(j *websiteImportJob) { j.Progress = 65 })
+
+	// Step 5: page tags
+	insertPageTagsRes := tx.Exec(`INSERT INTO page_tags (tag, created_at, updated_at)
+		SELECT t.tag, NOW(), NOW()
+		FROM (
+			SELECT DISTINCT UNNEST(tags) AS tag FROM website_import_staging WHERE job_id = ?
+		) t
+		LEFT JOIN page_tags pt ON pt.tag = t.tag
+		WHERE t.tag IS NOT NULL AND t.tag <> '' AND pt.id IS NULL`, job.ID)
+	if insertPageTagsRes.Error != nil {
+		tx.Rollback()
+		return nil, insertPageTagsRes.Error
+	}
+	pageTagsCreated = insertPageTagsRes.RowsAffected
+
+	pageTagLinkSQL := `INSERT INTO page_tag_pages (page_id, page_tag_id)
+		SELECT p.id, pt.id
+		FROM website_import_staging s
+		JOIN pages p ON p.target_uri = s.url
+		JOIN LATERAL UNNEST(s.tags) AS t(tag) ON TRUE
+		JOIN page_tags pt ON pt.tag = t.tag
+		LEFT JOIN page_tag_pages ptp ON ptp.page_id = p.id AND ptp.page_tag_id = pt.id
+		WHERE s.job_id = ? AND s.url <> s.domain
+		  AND t.tag IS NOT NULL AND t.tag <> ''
+		  AND ptp.page_id IS NULL`
+	if !job.Accepted {
+		pageTagLinkSQL += ` AND p.accepted = false`
+	}
+	pageTagLinkSQL += ` ON CONFLICT DO NOTHING`
+	pageTagLinkRes := tx.Exec(pageTagLinkSQL, job.ID)
+	if pageTagLinkRes.Error != nil {
+		tx.Rollback()
+		return nil, pageTagLinkRes.Error
+	}
+	pageTagLinks = pageTagLinkRes.RowsAffected
+
+	updateWebsiteImportJob(job, func(j *websiteImportJob) { j.Progress = 80 })
+
+	// Step 6: website tags
+	insertWebsiteTagsRes := tx.Exec(`INSERT INTO website_tags (tag, created_at, updated_at)
 		SELECT t.tag, NOW(), NOW()
 		FROM (
 			SELECT DISTINCT UNNEST(tags) AS tag FROM website_import_staging WHERE job_id = ?
 		) t
 		LEFT JOIN website_tags wt ON wt.tag = t.tag
 		WHERE t.tag IS NOT NULL AND t.tag <> '' AND wt.id IS NULL`, job.ID)
-	if insertTagsRes.Error != nil {
+	if insertWebsiteTagsRes.Error != nil {
 		tx.Rollback()
-		return nil, insertTagsRes.Error
+		return nil, insertWebsiteTagsRes.Error
 	}
-	tagsCreated = insertTagsRes.RowsAffected
+	tagsCreated = insertWebsiteTagsRes.RowsAffected
 
-	linkRes := tx.Exec(`INSERT INTO website_tag_websites (website_id, website_tag_id)
+	websiteTagLinkSQL := `INSERT INTO website_tag_websites (website_id, website_tag_id)
 		SELECT w.id, wt.id
 		FROM website_import_staging s
 		JOIN websites w ON w.domain = s.domain
 		JOIN LATERAL UNNEST(s.tags) AS t(tag) ON TRUE
 		JOIN website_tags wt ON wt.tag = t.tag
-		LEFT JOIN website_tag_websites l ON l.website_id = w.id AND l.website_tag_id = wt.id
-		WHERE s.job_id = ? AND t.tag IS NOT NULL AND t.tag <> '' AND l.website_id IS NULL`, job.ID)
-	if linkRes.Error != nil {
-		tx.Rollback()
-		return nil, linkRes.Error
+		LEFT JOIN website_tag_websites wtw ON wtw.website_id = w.id AND wtw.website_tag_id = wt.id
+		WHERE s.job_id = ?
+		  AND t.tag IS NOT NULL AND t.tag <> ''
+		  AND wtw.website_id IS NULL`
+	if !job.Accepted {
+		websiteTagLinkSQL += ` AND w.accepted = false`
 	}
-	tagLinksCreated = linkRes.RowsAffected
-
-	if err := tx.Raw(`SELECT COUNT(DISTINCT w.id)
-		FROM website_import_staging s
-		JOIN websites w ON w.domain = s.domain
-		WHERE s.job_id = ?`, job.ID).Scan(&websitesTagged).Error; err != nil {
+	websiteTagLinkSQL += ` ON CONFLICT DO NOTHING`
+	websiteTagLinkRes := tx.Exec(websiteTagLinkSQL, job.ID)
+	if websiteTagLinkRes.Error != nil {
 		tx.Rollback()
-		return nil, err
+		return nil, websiteTagLinkRes.Error
 	}
+	websiteTagLinks = websiteTagLinkRes.RowsAffected
 
 	if err := tx.Commit().Error; err != nil {
 		return nil, err
@@ -712,23 +797,26 @@ func processWebsiteImport(db *gorm.DB, job *websiteImportJob, filePath string) (
 
 	updateWebsiteImportJob(job, func(j *websiteImportJob) {
 		j.Progress = 90
-		j.ProcessedDomains = int(uniqueDomains)
+		j.ProcessedDomains = int(uniqueURLs)
 	})
 
 	_ = clearWebsiteImportStaging(db, job.ID)
 
 	return map[string]any{
-		"type":            job.Type,
-		"accepted":        job.Accepted,
-		"total_lines":     totalLines,
-		"valid_domains":   validDomains,
-		"unique_domains":  int(uniqueDomains),
-		"matched_domains": matchedDomains,
-		"created_domains": createdDomains,
-		"updated_rows":    updatedRows,
-		"tags_created":    tagsCreated,
-		"websites_tagged": websitesTagged,
-		"tag_links":       tagLinksCreated,
+		"type":              job.Type,
+		"accepted":          job.Accepted,
+		"total_lines":       totalLines,
+		"valid_urls":        validURLs,
+		"unique_urls":       int(uniqueURLs),
+		"unique_domains":    int(uniqueDomains),
+		"created_domains":   createdDomains,
+		"updated_domains":   updatedDomains,
+		"created_pages":     createdPages,
+		"updated_pages":     updatedPages,
+		"tags_created":      tagsCreated,
+		"page_tags_created": pageTagsCreated,
+		"website_tag_links": websiteTagLinks,
+		"page_tag_links":    pageTagLinks,
 	}, nil
 }
 
@@ -825,6 +913,51 @@ func normalizeWebsiteDomain(raw string) string {
 	return host
 }
 
+// normalizeImportLine returns (domain, pageURL):
+// domain — lowercase hostname only; pageURL — full URL if a meaningful path exists, otherwise == domain.
+func normalizeImportLine(raw string) (domain string, pageURL string) {
+	line := strings.TrimSpace(raw)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", ""
+	}
+
+	line = strings.Trim(line, "\"'")
+	if line == "" {
+		return "", ""
+	}
+
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return "", ""
+	}
+
+	candidate := parts[0]
+	if !strings.Contains(candidate, "://") {
+		candidate = "http://" + candidate
+	}
+
+	parsedURL, err := url.Parse(candidate)
+	if err != nil {
+		return "", ""
+	}
+
+	host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
+	if host == "" {
+		return "", ""
+	}
+
+	path := strings.TrimRight(parsedURL.Path, "/")
+	if path == "" {
+		return host, host
+	}
+
+	full := "https://" + host + path
+	if parsedURL.RawQuery != "" {
+		full += "?" + parsedURL.RawQuery
+	}
+	return host, full
+}
+
 func splitStringSliceIntoChunks(items []string, chunkSize int) [][]string {
 	if len(items) == 0 {
 		return nil
@@ -869,14 +1002,16 @@ func splitWebsiteTagLinksIntoChunks(items []websiteTagWebsiteLink, chunkSize int
 
 func ensureWebsiteImportStagingTable(db *gorm.DB) error {
 	return db.Exec(`
+		DROP TABLE IF EXISTS website_import_staging;
 		CREATE TABLE IF NOT EXISTS website_import_staging (
 			job_id TEXT NOT NULL,
+			url    TEXT NOT NULL,
 			domain TEXT NOT NULL,
-			tags TEXT[],
-			PRIMARY KEY (job_id, domain)
+			tags   TEXT[],
+			PRIMARY KEY (job_id, url)
 		);
-		CREATE INDEX IF NOT EXISTS idx_website_import_staging_job ON website_import_staging(job_id);
-		CREATE INDEX IF NOT EXISTS idx_website_import_staging_domain ON website_import_staging(domain);
+		CREATE INDEX IF NOT EXISTS idx_website_import_staging_job    ON website_import_staging(job_id);
+		CREATE INDEX IF NOT EXISTS idx_website_import_staging_domain ON website_import_staging(job_id, domain);
 	`).Error
 }
 
@@ -889,33 +1024,44 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 		return nil
 	}
 
-	// Дедупликация доменов внутри батча и объединение тегов, чтобы не ловить конфликт первичного ключа
-	dedup := make(map[string]map[string]struct{}, len(rows))
+	type dedupEntry struct {
+		domain string
+		tags   map[string]struct{}
+	}
+	dedup := make(map[string]*dedupEntry, len(rows))
 	order := make([]string, 0, len(rows))
+
 	for _, r := range rows {
-		if r.Domain == "" {
+		if r.URL == "" {
 			continue
 		}
-		if _, exists := dedup[r.Domain]; !exists {
-			dedup[r.Domain] = map[string]struct{}{}
-			order = append(order, r.Domain)
-		}
-		for _, t := range r.Tags {
-			if strings.TrimSpace(t) == "" {
-				continue
+		if e, exists := dedup[r.URL]; exists {
+			for _, t := range r.Tags {
+				if strings.TrimSpace(t) != "" {
+					e.tags[t] = struct{}{}
+				}
 			}
-			dedup[r.Domain][t] = struct{}{}
+		} else {
+			tagMap := make(map[string]struct{}, len(r.Tags))
+			for _, t := range r.Tags {
+				if strings.TrimSpace(t) != "" {
+					tagMap[t] = struct{}{}
+				}
+			}
+			dedup[r.URL] = &dedupEntry{domain: r.Domain, tags: tagMap}
+			order = append(order, r.URL)
 		}
 	}
 
 	rows = rows[:0]
-	for _, domain := range order {
-		tags := make([]string, 0, len(dedup[domain]))
-		for t := range dedup[domain] {
+	for _, u := range order {
+		e := dedup[u]
+		tags := make([]string, 0, len(e.tags))
+		for t := range e.tags {
 			tags = append(tags, t)
 		}
 		sort.Strings(tags)
-		rows = append(rows, websiteImportStagingRow{Domain: domain, Tags: tags})
+		rows = append(rows, websiteImportStagingRow{URL: u, Domain: e.domain, Tags: tags})
 	}
 
 	ctx := context.Background()
@@ -929,26 +1075,29 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 				pgxConn := stdlibConn.Conn()
 
 				tempName := fmt.Sprintf("_tmp_web_import_%s", jobID)
-				if _, execErr := pgxConn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE IF NOT EXISTS %s (job_id text, domain text, tags text[]) ON COMMIT DROP", tempName)); execErr != nil {
+				if _, execErr := pgxConn.Exec(ctx, fmt.Sprintf(
+					"CREATE TEMP TABLE IF NOT EXISTS %s (job_id text, url text, domain text, tags text[]) ON COMMIT DROP",
+					tempName,
+				)); execErr != nil {
 					return execErr
 				}
 
 				copyRows := make([][]any, len(rows))
 				for i, r := range rows {
-					copyRows[i] = []any{jobID, r.Domain, r.Tags}
+					copyRows[i] = []any{jobID, r.URL, r.Domain, r.Tags}
 				}
 
 				if _, copyErr := pgxConn.CopyFrom(ctx,
 					pgx.Identifier{tempName},
-					[]string{"job_id", "domain", "tags"},
+					[]string{"job_id", "url", "domain", "tags"},
 					pgx.CopyFromRows(copyRows),
 				); copyErr != nil {
 					return copyErr
 				}
 
-				mergeSQL := fmt.Sprintf(`INSERT INTO website_import_staging (job_id, domain, tags)
-                    SELECT job_id, domain, tags FROM %s
-                    ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags`, tempName)
+				mergeSQL := fmt.Sprintf(`INSERT INTO website_import_staging (job_id, url, domain, tags)
+					SELECT job_id, url, domain, tags FROM %s
+					ON CONFLICT (job_id, url) DO UPDATE SET tags = EXCLUDED.tags`, tempName)
 				if _, mergeErr := pgxConn.Exec(ctx, mergeSQL); mergeErr != nil {
 					return mergeErr
 				}
@@ -962,14 +1111,16 @@ func bulkUpsertWebsiteImportStaging(db *gorm.DB, jobID string, rows []websiteImp
 		}
 	}
 
-	values := make([]any, 0, len(rows)*3)
+	values := make([]any, 0, len(rows)*4)
 	placeholders := make([]string, 0, len(rows))
 	for _, row := range rows {
-		placeholders = append(placeholders, "(?, ?, string_to_array(?, ',')::text[])")
-		values = append(values, jobID, row.Domain, strings.Join(row.Tags, ","))
+		placeholders = append(placeholders, "(?, ?, ?, string_to_array(?, ',')::text[])")
+		values = append(values, jobID, row.URL, row.Domain, strings.Join(row.Tags, ","))
 	}
 
-	query := "INSERT INTO website_import_staging (job_id, domain, tags) VALUES " + strings.Join(placeholders, ",") + " ON CONFLICT (job_id, domain) DO UPDATE SET tags = EXCLUDED.tags"
+	query := "INSERT INTO website_import_staging (job_id, url, domain, tags) VALUES " +
+		strings.Join(placeholders, ",") +
+		" ON CONFLICT (job_id, url) DO UPDATE SET tags = EXCLUDED.tags"
 	return db.Exec(query, values...).Error
 }
 

@@ -36,6 +36,11 @@ const items = [
     icon: 'i-lucide-database',
     to: '/websites',
   },
+  {
+    label: 'Страницы',
+    icon: 'i-lucide-link',
+    to: '/pages',
+  },
 ];
 </script>
 

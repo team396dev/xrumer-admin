@@ -59,7 +59,7 @@ func main() {
 		log.Fatalf("failed to connect to postgres: %v", err)
 	}
 
-	if err := db.AutoMigrate(&models.Website{}, &models.Page{}, &models.WebsiteTag{}, &models.WebsiteTagWebsite{}); err != nil {
+	if err := db.AutoMigrate(&models.Website{}, &models.Page{}, &models.WebsiteTag{}, &models.WebsiteTagWebsite{}, &models.PageTag{}, &models.PageTagPage{}); err != nil {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -84,6 +84,7 @@ func main() {
 	router.POST("/websites/accepted/import", crud.WebsiteBulkAcceptedImportHandler(db))
 	router.GET("/websites/accepted/import/:jobID", crud.WebsiteBulkAcceptedImportStatusHandler())
 	router.GET("/pages", crud.PageListHandler(db))
+	router.GET("/pages/export", crud.PageExportTSVHandler(db))
 	router.GET("/dashboard", crud.DashboardGetHandler(db))
 
 	threads, _ := strconv.Atoi(getEnv("THREADS", "10"))
